@@ -11,30 +11,20 @@ import {
   LayoutDashboard, Wallet, Receipt, Users, Settings2, Activity, 
   Package, LayoutGrid, BarChart3, Truck, Factory, AlertTriangle, 
   MapPin, CheckCircle2, XCircle, Search, RefreshCw, Plus, FileSpreadsheet, Download,
-  Edit2, Trash2, Check, X, Bell, History, Sliders, ChevronDown, ChevronUp
+  Edit2, Trash2, Check, X, Bell, History, Sliders, ChevronDown, ChevronUp, Printer
 } from 'lucide-react';
 
 import { VerificationStatusBadge, VerificationPriorityBadge } from '../../../components/verification/VerificationRequestBadge';
 import { VerificationAudit } from '../../../components/verification/VerificationAudit';
 import { VerificationModal } from '../../../components/verification/VerificationModal';
 import { useVerification } from '../../../components/verification/useVerification';
+import PrintLabelsModal from '../../../components/PrintLabelsModal';
+
+import { StatusBadge, ALLOWED_STATUSES } from '../../../components/ui/StatusBadge';
 
 // ─── Status Badge ───────────────────────────────────────────────────────────
 function statusBadge(status) {
-  const styles = {
-    'Delivered': 'bg-emerald-100 text-emerald-700 border-emerald-200',
-    'Cancelled': 'bg-red-100 text-red-700 border-red-200',
-    'Returned': 'bg-sky-100 text-sky-700 border-sky-200',
-    'Returned to Vendor': 'bg-sky-100 text-sky-700 border-sky-200',
-    'Pending': 'bg-amber-100 text-amber-700 border-amber-200',
-    'Pick Up Requested': 'bg-amber-100 text-amber-700 border-amber-200',
-    'Picked Up': 'bg-brand-100 text-brand-700 border-brand-200',
-    'In Warehouse': 'bg-brand-100 text-brand-700 border-brand-200',
-    'Out for Delivery': 'bg-brand-100 text-brand-700 border-brand-200',
-    'Postponed': 'bg-orange-100 text-orange-700 border-orange-200',
-  };
-  const style = styles[status] || 'bg-slate-100 text-slate-700 border-slate-200';
-  return <span className={'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border ' + style}>{status}</span>;
+  return <StatusBadge status={status} />;
 }
 
 const AdminPackages = () => {
@@ -56,6 +46,7 @@ const AdminPackages = () => {
   const [showFilters, setShowFilters] = useState(false);
   const [pagination, setPagination] = useState(null);
   const [selected, setSelected] = useState([]);
+  const [bulkStatusLoading, setBulkStatusLoading] = useState(false);
   const { showToast } = useToast();
 
   const [editModal, setEditModal] = useState(false);
@@ -72,6 +63,7 @@ const AdminPackages = () => {
 
   const [createModal, setCreateModal] = useState(false);
   const [csvModal, setCsvModal] = useState(false);
+  const [printLabelsModalOpen, setPrintLabelsModalOpen] = useState(false);
   const [vendors, setVendors] = useState([]);
   const [newPkg, setNewPkg] = useState({ vendorId: '', customerName: '', customerPhone: '', address: '', city: '', amount: '', weight: '0.5', deliveryDate: '' });
   const [csvVendorId, setCsvVendorId] = useState('');
@@ -192,6 +184,25 @@ const AdminPackages = () => {
     }
   };
 
+  const handleBulkStatusChange = async (newStatus) => {
+    if (!selected.length) return;
+    if (!newStatus) return;
+    setBulkStatusLoading(true);
+    try {
+      const res = await api.put('/admin/packages/bulk-status', {
+        packageIds: selected,
+        status: newStatus
+      });
+      showToast(res.data?.message || `Updated ${selected.length} packages to ${newStatus}`, 'success');
+      setSelected([]);
+      fetchPackages(true);
+    } catch (err) {
+      showToast(err.response?.data?.message || 'Failed to update package statuses', 'error');
+    } finally {
+      setBulkStatusLoading(false);
+    }
+  };
+
   const handleDelete = async (id, trackingCode) => {
     if (!window.confirm(`Delete package "${trackingCode}"? This will soft-delete it.`)) return;
     
@@ -306,8 +317,6 @@ const AdminPackages = () => {
     }
   };
 
-  const statuses = ['Pending', 'Pick Up Requested', 'Picked Up', 'In Warehouse', 'Out for Delivery', 'Delivered', 'Postponed', 'Cancelled', 'Returned', 'Returned to Vendor'];
-
   return (
     <>
       <div className="card-premium animate-fadeIn overflow-hidden">
@@ -338,6 +347,9 @@ const AdminPackages = () => {
 
           <button className="btn-primary py-2 flex items-center gap-2" onClick={() => setCreateModal(true)}>
             <Plus className="w-4 h-4" /> Create Order
+          </button>
+          <button className="btn-outline py-2 flex items-center gap-2 bg-white text-slate-800 border-slate-300 hover:bg-slate-50" onClick={() => setPrintLabelsModalOpen(true)} title="Print 4x6 Delivery Labels">
+            <Printer className="w-4 h-4 text-slate-700" /> Print Labels
           </button>
           <button className="btn-outline py-2 flex items-center gap-2" onClick={() => setCsvModal(true)}>
             <FileSpreadsheet className="w-4 h-4 text-emerald-600" /> CSV Upload
@@ -389,7 +401,7 @@ const AdminPackages = () => {
               <label className="block text-xs font-bold text-slate-500 mb-1">Status</label>
               <select className="input-field py-2 w-full" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
                 <option value="">All Statuses</option>
-                {statuses.map(s => <option key={s} value={s}>{s}</option>)}
+                {ALLOWED_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
             <div>
@@ -409,20 +421,40 @@ const AdminPackages = () => {
       
         {/* Bulk Action Bar */}
         {selected.length > 0 && (
-          <div className="bg-emerald-50/90 border-b border-emerald-200 px-6 py-2.5 flex items-center justify-between animate-fadeIn">
-            <span className="text-xs font-bold text-emerald-900">
-              ✓ {selected.length} package{selected.length !== 1 ? 's' : ''} selected
+          <div className="bg-slate-900 text-white border-b border-slate-800 px-6 py-3 flex flex-wrap items-center justify-between gap-3 animate-fadeIn">
+            <span className="text-xs font-bold text-slate-200 tracking-wider uppercase">
+              {selected.length} package{selected.length !== 1 ? 's' : ''} selected
             </span>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-slate-300">Quick Action:</span>
+                <select
+                  disabled={bulkStatusLoading}
+                  defaultValue=""
+                  onChange={(e) => {
+                    if (e.target.value) {
+                      handleBulkStatusChange(e.target.value);
+                      e.target.value = "";
+                    }
+                  }}
+                  className="bg-slate-800 text-white text-xs font-bold px-3 py-1.5 rounded-lg border border-slate-700 focus:outline-none focus:ring-2 focus:ring-brand-500 cursor-pointer"
+                >
+                  <option value="" disabled>{bulkStatusLoading ? 'Updating...' : 'Change Status...'}</option>
+                  {ALLOWED_STATUSES.map(st => (
+                    <option key={st} value={st}>{st}</option>
+                  ))}
+                </select>
+              </div>
+
               <button 
                 onClick={handleBulkVerify}
                 className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs shadow-xs transition-colors flex items-center gap-1.5"
               >
-                <CheckCircle2 className="w-3.5 h-3.5" /> Bulk Verify & Accept ({selected.length})
+                <CheckCircle2 className="w-3.5 h-3.5" /> Bulk Verify ({selected.length})
               </button>
               <button 
                 onClick={() => setSelected([])}
-                className="px-2.5 py-1.5 bg-white text-slate-600 hover:bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold"
+                className="px-2.5 py-1.5 bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700 rounded-lg text-xs font-semibold"
               >
                 Deselect
               </button>
@@ -470,6 +502,11 @@ const AdminPackages = () => {
                     <td className="px-6 py-4">
                       <div className="flex flex-col gap-1 items-start">
                         {statusBadge(p.status)}
+                        {p.isRateUnconfigured && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-extrabold bg-red-100 text-red-700 border border-red-300 animate-pulse" title="This destination has no rate set in Pricing Engine!">
+                            ⚠️ Unset Rate
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td className="px-6 py-4">
@@ -610,15 +647,9 @@ const AdminPackages = () => {
                   <div>
                     <label className="block text-sm font-semibold text-slate-700 mb-1">Delivery Status</label>
                     <select className="input-field" value={editPkg.status || ''} onChange={e => setEditPkg({ ...editPkg, status: e.target.value })}>
-                      <option value="Pending">Pending</option>
-                      <option value="In Warehouse">In Warehouse</option>
-                      <option value="Sorted">Sorted</option>
-                      <option value="Out for Delivery">Out for Delivery</option>
-                      <option value="Delivered">Delivered</option>
-                      <option value="Returned">Returned</option>
-                      <option value="Cancelled">Cancelled</option>
-                      <option value="Exchanged">Exchanged</option>
-                      <option value="Postponed">Hold (Postponed)</option>
+                      {ALLOWED_STATUSES.map(st => (
+                        <option key={st} value={st}>{st}</option>
+                      ))}
                     </select>
                   </div>
                 </div>
@@ -801,6 +832,16 @@ const AdminPackages = () => {
           handleVerify={handleVerify} 
         />
       )}
+
+      {/* Print Delivery Labels Modal */}
+      <PrintLabelsModal
+        isOpen={printLabelsModalOpen}
+        onClose={() => setPrintLabelsModalOpen(false)}
+        packages={packages}
+        vendors={vendors}
+        riders={riders}
+        onRefresh={() => fetchPackages(true)}
+      />
     </>
   );
 };

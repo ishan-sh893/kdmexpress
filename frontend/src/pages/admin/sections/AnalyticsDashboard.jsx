@@ -149,9 +149,7 @@ const AnalyticsDashboard = () => {
           <MetricCard title="Deliveries Today" value={data.todayDeliveries ?? 0} color="success" icon={<CheckCircle2 className="w-5 h-5 text-emerald-600" />} />
           <MetricCard title="COD Today" value={`Rs. ${fmt(data.todayCOD ?? 0)}`} color="info" icon={<DollarSign className="w-5 h-5 text-sky-600" />} />
           <MetricCard title="Orders This Month" value={data.monthPackages ?? 0} color="purple" icon={<TrendingUp className="w-5 h-5 text-purple-600" />} />
-          <div className="cursor-pointer transition-transform hover:-translate-y-1" onClick={() => navigate('/admin/expenses')}>
-            <MetricCard title="Pending Expenses" value={data.todayExpenses ?? 0} color="warning" icon={<AlertTriangle className="w-5 h-5 text-amber-600" />} />
-          </div>
+          <MetricCard title="Pending Expenses" value={data.todayExpenses ?? 0} color="warning" icon={<AlertTriangle className="w-5 h-5 text-amber-600" />} />
           <div className="cursor-pointer transition-transform hover:-translate-y-1" onClick={() => navigate('/admin/settlements')}>
             <MetricCard title="COD Pending" value={`Rs. ${fmt(data.codPending ?? 0)}`} color="danger" icon={<Clock className="w-5 h-5 text-red-600" />} />
           </div>
@@ -162,12 +160,24 @@ const AnalyticsDashboard = () => {
       <div>
         <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Delivery Overview</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
-          <MetricCard title="Total Packages" value={data.totalPackages ?? 0} color="primary" icon={<Package className="w-5 h-5 text-brand-600" />} />
-          <MetricCard title="Delivered" value={data.delivered ?? 0} color="success" icon={<CheckCircle2 className="w-5 h-5 text-emerald-600" />} />
-          <MetricCard title="Pending" value={data.pending ?? 0} color="warning" icon={<AlertTriangle className="w-5 h-5 text-amber-600" />} />
-          <MetricCard title="Out for Delivery" value={data.outForDelivery ?? 0} color="info" icon={<Truck className="w-5 h-5 text-sky-600" />} />
-          <MetricCard title="Cancelled" value={data.cancelled ?? 0} color="danger" icon={<XCircle className="w-5 h-5 text-red-600" />} />
-          <MetricCard title="Returned" value={data.returned ?? 0} color="purple" icon={<XCircle className="w-5 h-5 text-purple-600" />} />
+          <div className="cursor-pointer transition-transform hover:-translate-y-1" onClick={() => navigate('/admin/packages')}>
+            <MetricCard title="Total Packages" value={data.totalPackages ?? 0} color="primary" icon={<Package className="w-5 h-5 text-brand-600" />} />
+          </div>
+          <div className="cursor-pointer transition-transform hover:-translate-y-1" onClick={() => navigate('/admin/packages')}>
+            <MetricCard title="Delivered" value={data.delivered ?? 0} color="success" icon={<CheckCircle2 className="w-5 h-5 text-emerald-600" />} />
+          </div>
+          <div className="cursor-pointer transition-transform hover:-translate-y-1" onClick={() => navigate('/admin/packages')}>
+            <MetricCard title="Pending" value={data.pending ?? 0} color="warning" icon={<AlertTriangle className="w-5 h-5 text-amber-600" />} />
+          </div>
+          <div className="cursor-pointer transition-transform hover:-translate-y-1" onClick={() => navigate('/admin/packages')}>
+            <MetricCard title="Out for Delivery" value={data.outForDelivery ?? 0} color="info" icon={<Truck className="w-5 h-5 text-sky-600" />} />
+          </div>
+          <div className="cursor-pointer transition-transform hover:-translate-y-1" onClick={() => navigate('/admin/packages')}>
+            <MetricCard title="Cancelled" value={data.cancelled ?? 0} color="danger" icon={<XCircle className="w-5 h-5 text-red-600" />} />
+          </div>
+          <div className="cursor-pointer transition-transform hover:-translate-y-1" onClick={() => navigate('/admin/packages')}>
+            <MetricCard title="Returned" value={data.returned ?? 0} color="purple" icon={<XCircle className="w-5 h-5 text-purple-600" />} />
+          </div>
         </div>
       </div>
 

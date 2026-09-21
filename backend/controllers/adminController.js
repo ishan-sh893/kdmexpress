@@ -216,24 +216,13 @@ export const verifyCOD = async (req, res) => {
 
 // POST /api/admin/settlements/mark-paid
 export const markVendorPaid = async (req, res) => {
-  let session = null;
-  try {
-    session = await mongoose.startSession();
-    session.startTransaction();
-  } catch (e) {
-    session = null;
-  }
-
   try {
     const { packageIds, reference, paymentMethod } = req.body;
     if (!packageIds || !packageIds.length) return res.status(400).json({ success: false, message: 'No packages selected' });
 
-    const packages = session
-      ? await Package.find({ _id: { $in: packageIds }, status: 'Delivered', vendorPaid: { $ne: true } }).session(session)
-      : await Package.find({ _id: { $in: packageIds }, status: 'Delivered', vendorPaid: { $ne: true } });
+    const packages = await Package.find({ _id: { $in: packageIds }, status: 'Delivered', vendorPaid: { $ne: true } });
 
     if (packages.length === 0) {
-      if (session) await session.abortTransaction();
       return res.status(400).json({ success: false, message: 'No eligible packages found' });
     }
 
@@ -252,14 +241,8 @@ export const markVendorPaid = async (req, res) => {
         message: `Vendor paid Rs. ${pkg.vendorReceivable}${reference ? ` (Ref: ${reference})` : ''}`,
         user: req.user?.name || 'Admin',
       });
-      if (session) {
-        await pkg.save({ session });
-      } else {
-        await pkg.save();
-      }
+      await pkg.save();
     }
-
-    if (session) await session.commitTransaction();
 
     // Invalidate dashboard cache
     dashboardCache.timestamp = 0;
@@ -270,10 +253,8 @@ export const markVendorPaid = async (req, res) => {
       data: { count: packages.length }
     });
   } catch (error) {
-    if (session) await session.abortTransaction();
+    console.error('Error in markVendorPaid:', error);
     res.status(500).json({ success: false, message: error.message });
-  } finally {
-    if (session) session.endSession();
   }
 };
 
@@ -750,16 +731,22 @@ export const createPackageForVendor = async (req, res) => {
     const labelUrls = generateLabelUrls(trackingCode);
 
     let finalDeliveryCharge = Number(deliveryCharge);
-    if (!finalDeliveryCharge) {
+    let isUnconfigured = false;
+
+    if (!finalDeliveryCharge || isNaN(finalDeliveryCharge) || finalDeliveryCharge <= 0) {
       try {
-        finalDeliveryCharge = await calculateDeliveryFee({
+        const { calculateDeliveryFeeDetails } = await import('../services/pricingService.js');
+        const feeDetails = await calculateDeliveryFeeDetails({
           vendorId,
           outOfValley: !!outOfValley,
           city: city || '',
-          weight: weight || 0.5
+          weight: Number(weight) || 0.5
         });
+        finalDeliveryCharge = feeDetails.fee;
+        isUnconfigured = feeDetails.isUnconfigured;
       } catch (e) {
-        finalDeliveryCharge = 0;
+        finalDeliveryCharge = outOfValley ? 200 : 100;
+        isUnconfigured = true;
       }
     }
 
@@ -778,20 +765,37 @@ export const createPackageForVendor = async (req, res) => {
       items: items || [],
       amount: Number(amount),
       deliveryCharge: finalDeliveryCharge,
+      isRateUnconfigured: isUnconfigured,
       vendorReceivable: Math.max(0, Number(amount) - finalDeliveryCharge),
       deliveryDate: deliveryDate ? new Date(deliveryDate) : null,
       vendorId,
       ...labelUrls,
-      status: PACKAGE_STATUS.IN_WAREHOUSE,
+      status: 'Warehouse',
       timeline: [{
         time: new Date().toISOString().replace('T', ' ').substring(0, 16),
-        status: PACKAGE_STATUS.IN_WAREHOUSE,
-        message: 'Package arrived at warehouse.',
+        status: 'Warehouse',
+        message: 'Package directly entered into Warehouse by Admin/Dispatcher.',
         user: req.user.name,
       }]
     });
 
     if (req.io) {
+      if (isUnconfigured) {
+        req.io.to('role_admin').to('role_dispatcher').emit('notification', {
+          id: `missing_rate_${pkg._id}_${Date.now()}`,
+          title: '🚨 HIGH ALERT: Unconfigured Delivery Rate',
+          message: `⚠️ HIGH ALERT: Package ${pkg.trackingCode} for "${pkg.city || pkg.address}" has NO configured delivery fee in Pricing Engine! Please review and set rate.`,
+          type: 'error',
+          priority: 'high',
+          packageId: pkg._id,
+          trackingCode: pkg.trackingCode,
+          destination: pkg.city || pkg.address,
+          vendorName: vendor.name,
+          path: '/admin/pricing-engine',
+          createdAt: new Date().toISOString()
+        });
+      }
+
       req.io.to('role_admin').emit('package:created', pkg);
       req.io.to('role_dispatcher').emit('package:created', pkg);
     }
@@ -865,11 +869,11 @@ export const bulkCreatePackagesForVendor = async (req, res) => {
         deliveryDate: p.deliveryDate ? new Date(p.deliveryDate) : null,
         vendorId,
         ...labelUrls,
-        status: PACKAGE_STATUS.IN_WAREHOUSE,
+        status: 'Warehouse',
         timeline: [{
           time: nowStr(),
-          status: PACKAGE_STATUS.IN_WAREHOUSE,
-          message: 'Package arrived at warehouse.',
+          status: 'Warehouse',
+          message: 'Package directly entered into Warehouse by Admin/Dispatcher.',
           user: req.user.name,
         }]
       });
@@ -1055,36 +1059,43 @@ export const getSettlements = async (req, res) => {
       Settlement.countDocuments()
     ]);
 
-    // Populate package details and add summary for each settlement
-    const enhancedSettlements = await Promise.all(
-      settlements.map(async (settlement) => {
-        const packages = await Package.find({ _id: { $in: settlement.packageIds } }).lean();
-        
-        const summary = {
-          totalPackages: packages.length,
-          totalCOD: packages.reduce((sum, pkg) => sum + (pkg.amount || 0), 0),
-          totalDeliveryCharges: packages.reduce((sum, pkg) => sum + (pkg.deliveryCharge || 0), 0),
-          netPayable: settlement.requestedAmount,
-          deductions: packages.reduce((sum, pkg) => sum + (pkg.deliveryCharge || 0), 0)
-        };
-        
-        return {
-          ...settlement,
-          packages: packages.map(pkg => ({
-            _id: pkg._id,
-            trackingCode: pkg.trackingCode,
-            customerName: pkg.customerName,
-            address: pkg.address,
-            amount: pkg.amount,
-            deliveryCharge: pkg.deliveryCharge,
-            status: pkg.status,
-            settlementStatus: pkg.settlementStatus,
-            deliveredAt: pkg.updatedAt
-          })),
-          summary
-        };
-      })
-    );
+    // Single batch query to eliminate N+1 database queries
+    const allPackageIds = settlements.flatMap(s => s.packageIds || []);
+    const allPackages = allPackageIds.length > 0 
+      ? await Package.find({ _id: { $in: allPackageIds } }).lean() 
+      : [];
+    const pkgMap = new Map(allPackages.map(p => [String(p._id), p]));
+
+    const enhancedSettlements = settlements.map((settlement) => {
+      const packages = (settlement.packageIds || [])
+        .map(id => pkgMap.get(String(id)))
+        .filter(Boolean);
+      
+      const totalDeliveryCharges = packages.reduce((sum, pkg) => sum + (pkg.deliveryCharge || 0), 0);
+      const summary = {
+        totalPackages: packages.length,
+        totalCOD: packages.reduce((sum, pkg) => sum + (pkg.amount || 0), 0),
+        totalDeliveryCharges,
+        netPayable: settlement.requestedAmount,
+        deductions: totalDeliveryCharges
+      };
+      
+      return {
+        ...settlement,
+        packages: packages.map(pkg => ({
+          _id: pkg._id,
+          trackingCode: pkg.trackingCode,
+          customerName: pkg.customerName,
+          address: pkg.address,
+          amount: pkg.amount,
+          deliveryCharge: pkg.deliveryCharge,
+          status: pkg.status,
+          settlementStatus: pkg.settlementStatus,
+          deliveredAt: pkg.updatedAt
+        })),
+        summary
+      };
+    });
 
     res.json({
       success: true,
@@ -1435,19 +1446,9 @@ export const savePackageVerificationDraft = async (req, res) => {
 
 // POST /api/v1/admin/packages/:id/verify-action
 export const verifyPackageAdmin = async (req, res) => {
-  let session = null;
-  try {
-    session = await mongoose.startSession();
-    session.startTransaction();
-  } catch (e) {
-    console.warn(`[WARN] MongoDB transaction failed in verifyPackageAdmin (likely no replica set). Proceeding without atomicity: ${e.message}`);
-    session = null;
-  }
-
   try {
     const { id } = req.params;
     const {
-      version,
       status,
       amount,
       deliveryCharge,
@@ -1463,220 +1464,210 @@ export const verifyPackageAdmin = async (req, res) => {
       customRemarks,
     } = req.body;
 
-    const pkg = await Package.findById(id).session(session ? session : null);
+    const pkg = await Package.findById(id);
     if (!pkg) {
-      if (session) await session.abortTransaction();
       return res.status(404).json({ success: false, message: 'Package not found.' });
     }
 
     const isEditVerified = pkg.deliveryVerificationStatus === 'Verified';
 
-    // Optimistic Concurrency Control check
-    if (version !== undefined && pkg.__v !== version) {
-      if (session) await session.abortTransaction();
-      return res.status(409).json({
-        success: false,
-        message: 'This package was modified by another admin. Please refresh and try again.',
-      });
-    }
+    const targetStatus = status || pkg.riderSubmission?.status || pkg.status || 'Delivered';
+    const targetAmount = (amount !== undefined && amount !== null && !isNaN(Number(amount)))
+      ? Number(amount)
+      : (pkg.riderSubmission?.amount !== undefined ? pkg.riderSubmission.amount : (pkg.amount || 0));
 
-    const previousAmount = isEditVerified ? pkg.amount : (pkg.riderSubmission?.amount || pkg.amount);
+    const previousAmount = Number(isEditVerified ? pkg.amount : (pkg.riderSubmission?.amount !== undefined ? pkg.riderSubmission.amount : pkg.amount)) || 0;
     const previousStatus = isEditVerified ? pkg.status : (pkg.riderSubmission?.status || pkg.status);
     
-    const difference = amount - previousAmount;
+    const difference = targetAmount - previousAmount;
     const now = new Date();
     const nowStrVal = nowStr(now);
 
     const timelineChanges = [];
+    const pushUpdates = {};
 
     // Financial adjustment logging
-    if (difference !== 0) {
-      pkg.financialAdjustments.push({
+    if (!isNaN(difference) && difference !== 0) {
+      pushUpdates.financialAdjustments = {
         originalAmount: previousAmount,
-        adjustedAmount: amount,
+        adjustedAmount: targetAmount,
         difference,
         reason: reason || 'Adjustment',
-        adjustedBy: req.user._id,
-        adjustedByName: req.user.name,
+        adjustedBy: req.user?._id || req.user?.id,
+        adjustedByName: req.user?.name || 'Admin',
         createdAt: now,
-      });
-      timelineChanges.push({ field: 'amount', before: previousAmount, after: amount });
+      };
+      timelineChanges.push({ field: 'amount', before: previousAmount, after: targetAmount });
     }
 
-    if (previousStatus !== status) {
-      timelineChanges.push({ field: 'status', before: previousStatus, after: status });
+    if (previousStatus !== targetStatus) {
+      timelineChanges.push({ field: 'status', before: previousStatus, after: targetStatus });
     }
 
-    // Apply edits
-    pkg.status = status;
-    pkg.amount = amount;
-    if (deliveryCharge !== undefined) pkg.deliveryCharge = deliveryCharge;
-    if (comments !== undefined) pkg.comments = comments;
-    if (receiverName !== undefined) pkg.customerName = receiverName;
-    if (receiverPhone !== undefined) pkg.customerPhone = receiverPhone;
+    const setUpdates = {
+      status: targetStatus,
+      amount: targetAmount,
+      deliveryVerificationStatus: 'Verified',
+      verifiedAt: now,
+      verificationCompletedAt: now,
+      activeVerificationPriority: '',
+      verificationDraft: null,
+    };
+
+    if (deliveryCharge !== undefined && deliveryCharge !== null && !isNaN(Number(deliveryCharge))) {
+      setUpdates.deliveryCharge = Number(deliveryCharge);
+    }
+    if (comments !== undefined && comments !== null) {
+      if (typeof comments === 'string' && comments.trim()) {
+        pushUpdates.comments = {
+          text: comments.trim(),
+          user: req.user?.name || 'Admin',
+          role: req.user?.role || 'admin',
+          createdAt: now,
+        };
+      } else if (Array.isArray(comments)) {
+        setUpdates.comments = comments;
+      }
+    }
+    if (receiverName !== undefined) setUpdates.customerName = receiverName;
+    if (receiverPhone !== undefined) setUpdates.customerPhone = receiverPhone;
     if (deliveryDate !== undefined) {
-      pkg.deliveryDate = deliveryDate ? new Date(deliveryDate) : null;
+      setUpdates.deliveryDate = deliveryDate ? new Date(deliveryDate) : null;
     }
-    pkg.holdReason = holdReason || '';
-    pkg.rejectReason = rejectReason || '';
-    pkg.paymentMethod = paymentMethod || 'Cash';
-    pkg.collectionType = collectionType || '';
+    if (holdReason !== undefined) setUpdates.holdReason = holdReason;
+    if (rejectReason !== undefined) setUpdates.rejectReason = rejectReason;
+    if (paymentMethod !== undefined) setUpdates.paymentMethod = paymentMethod;
+    if (collectionType !== undefined) setUpdates.collectionType = collectionType;
 
-    // Verify status updates
-    pkg.deliveryVerificationStatus = 'Verified';
-    pkg.verifiedAt = now;
-    pkg.verificationCompletedAt = now;
-    pkg.activeVerificationPriority = '';
     if (pkg.verificationStartedAt) {
-      pkg.verificationDuration = Math.round((now - pkg.verificationStartedAt) / 60000);
+      setUpdates.verificationDuration = Math.round((now - pkg.verificationStartedAt) / 60000);
+    }
+
+    if (targetStatus === 'Delivered') {
+      setUpdates.codVerified = true;
+      setUpdates.codVerificationStatus = 'Verified';
+      setUpdates.settlementStatus = 'Verified';
+    } else {
+      setUpdates.codVerificationStatus = 'Pending';
     }
 
     // Resolve any pending verification requests
     let requesterToNotify = null;
     if (pkg.verificationRequests && pkg.verificationRequests.length > 0) {
-      const pendingRequest = pkg.verificationRequests.find(r => r.status === 'Pending');
-      if (pendingRequest) {
-        pendingRequest.status = 'Resolved';
-        pendingRequest.resolvedBy = req.user._id;
-        pendingRequest.resolvedByName = req.user.name;
-        pendingRequest.resolvedAt = now;
-        pendingRequest.resolutionNotes = reason || customRemarks || 'Verified by admin';
-        requesterToNotify = pendingRequest.requestedBy;
-      }
-    }
-
-    if (status === 'Delivered') {
-      pkg.codVerified = true;
-      pkg.codVerificationStatus = 'Verified';
-      pkg.settlementStatus = 'Verified';
-    } else {
-      pkg.codVerificationStatus = 'Pending';
-    }
-
-    // Clear Draft
-    pkg.verificationDraft = null;
-
-    // Timeline Log
-    if (timelineChanges.length > 0) {
-      for (const change of timelineChanges) {
-        appendTimelineEvent(pkg, {
-          time: nowStrVal,
-          status: status,
-          message: `Admin verified & updated ${change.field}: ${change.before} -> ${change.after}. Reason: ${reason}.`,
-          user: req.user.name,
-          role: req.user.role,
-          type: 'VERIFIED',
-          changes: [change],
-        });
-      }
-    } else {
-      appendTimelineEvent(pkg, {
-        time: nowStrVal,
-        status: status,
-        message: `Package verified by admin ${req.user.name}. Reason: ${reason}.`,
-        user: req.user.name,
-        role: req.user.role,
-        type: 'VERIFIED',
-        changes: [],
+      const updatedRequests = pkg.verificationRequests.map(r => {
+        if (r.status === 'Pending') {
+          requesterToNotify = r.requestedBy;
+          return {
+            ...r.toObject ? r.toObject() : r,
+            status: 'Resolved',
+            resolvedBy: req.user?._id || req.user?.id,
+            resolvedByName: req.user?.name || 'Admin',
+            resolvedAt: now,
+            resolutionNotes: reason || customRemarks || 'Verified by admin'
+          };
+        }
+        return r;
       });
+      setUpdates.verificationRequests = updatedRequests;
     }
 
-    // User-agent audit parsing
-    const ua = req.headers['user-agent'] || '';
-    let browser = 'Unknown Browser';
-    let device = 'Desktop';
-    if (ua.includes('Chrome')) browser = 'Chrome';
-    else if (ua.includes('Safari')) browser = 'Safari';
-    else if (ua.includes('Firefox')) browser = 'Firefox';
-    else if (ua.includes('Edge')) browser = 'Edge';
+    const timelineMsg = timelineChanges.length > 0
+      ? `Admin verified & updated ${timelineChanges.map(c => `${c.field}: ${c.before} -> ${c.after}`).join(', ')}. Reason: ${reason || 'Verification'}.`
+      : `Package verified by admin ${req.user?.name || 'Admin'}. Reason: ${reason || 'Verification'}.`;
 
-    if (ua.includes('Mobi') || ua.includes('Android') || ua.includes('iPhone')) {
-      device = 'Mobile';
-    }
+    const newTimelineEvent = {
+      time: nowStrVal,
+      status: targetStatus,
+      message: timelineMsg,
+      user: req.user?.name || 'Admin',
+      role: req.user?.role || 'admin',
+      type: 'VERIFIED',
+      changes: timelineChanges,
+    };
 
-    // Push Verification Audit Log
-    pkg.verificationAudit.push({
+    const newAuditLog = {
       riderSubmission: pkg.riderSubmission,
       previousAmount: previousAmount,
-      updatedAmount: amount,
-      difference,
+      updatedAmount: targetAmount,
+      difference: !isNaN(difference) ? difference : 0,
       previousStatus: previousStatus,
-      updatedStatus: status,
-      approvedBy: req.user._id,
-      approvedByName: req.user.name,
+      updatedStatus: targetStatus,
+      approvedBy: req.user?._id || req.user?.id,
+      approvedByName: req.user?.name || 'Admin',
       editTime: now,
       verificationTime: now,
-      reason,
+      reason: reason || 'System correction',
       customRemarks: customRemarks || '',
       action: isEditVerified ? 'Edit & Verify' : 'Verify',
       ipAddress: req.ip || req.connection?.remoteAddress || '127.0.0.1',
-      device,
-      browser,
-    });
+      device: 'Desktop',
+      browser: 'Web Portal',
+    };
 
-    await pkg.save(session ? { session } : {});
-    dashboardCache.timestamp = 0;
+    const mongoUpdate = {
+      $set: setUpdates,
+      $push: {
+        timeline: newTimelineEvent,
+        verificationAudit: newAuditLog,
+      }
+    };
 
-    if (session) {
-      await session.commitTransaction();
-      session.endSession();
+    if (pushUpdates.financialAdjustments) {
+      mongoUpdate.$push.financialAdjustments = pushUpdates.financialAdjustments;
     }
+    if (pushUpdates.comments) {
+      mongoUpdate.$push.comments = pushUpdates.comments;
+    }
+
+    const updatedPkg = await Package.findByIdAndUpdate(
+      id,
+      mongoUpdate,
+      { new: true, runValidators: false }
+    );
+
+    dashboardCache.timestamp = 0;
 
     if (req.io && requesterToNotify) {
       req.io.to(`user_${requesterToNotify}`).emit('notification', {
-        id: `verification_res_${pkg._id}_${Date.now()}`,
+        id: `verification_res_${updatedPkg._id}_${Date.now()}`,
         title: 'Verification Resolved',
-        message: `Your verification request for package ${pkg.trackingCode} has been resolved.`,
+        message: `Your verification request for package ${updatedPkg.trackingCode} has been resolved.`,
         type: 'success',
-        packageId: pkg._id,
-        trackingCode: pkg.trackingCode,
-        user: req.user.name,
-        role: req.user.role,
+        packageId: updatedPkg._id,
+        trackingCode: updatedPkg.trackingCode,
+        user: req.user?.name || 'Admin',
+        role: req.user?.role || 'admin',
         createdAt: new Date().toISOString()
       });
     }
 
     eventBus.emit('package.verified', {
-      pkg,
+      pkg: updatedPkg,
       reqUser: req.user,
       io: req.io,
       isAdjustment: difference !== 0,
       originalRiderAmount: previousAmount,
-      finalAmount: amount,
+      finalAmount: targetAmount,
       reason: reason,
     });
 
-    res.json({ success: true, data: pkg, message: 'Package verified successfully.' });
+    res.json({ success: true, data: updatedPkg, message: 'Package verified successfully.' });
   } catch (error) {
-    if (session) {
-      await session.abortTransaction();
-      session.endSession();
-    }
+    console.error('Error in verifyPackageAdmin:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
 // POST /api/v1/admin/packages/:id/reopen
 export const reopenPackageAdmin = async (req, res) => {
-  let session = null;
-  try {
-    session = await mongoose.startSession();
-    session.startTransaction();
-  } catch (e) {
-    console.warn(`[WARN] MongoDB transaction failed in reopenPackageAdmin (likely no replica set). Proceeding without atomicity: ${e.message}`);
-    session = null;
-  }
-
   try {
     const { id } = req.params;
-    const pkg = await Package.findById(id).session(session ? session : null);
+    const pkg = await Package.findById(id);
     if (!pkg) {
-      if (session) await session.abortTransaction();
       return res.status(404).json({ success: false, message: 'Package not found.' });
     }
 
     if (pkg.deliveryVerificationStatus !== 'Verified') {
-      if (session) await session.abortTransaction();
       return res.status(400).json({ success: false, message: 'Package is not verified yet.' });
     }
 
@@ -1721,41 +1712,23 @@ export const reopenPackageAdmin = async (req, res) => {
       browser: 'Admin Portal',
     });
 
-    await pkg.save(session ? { session } : {});
+    await pkg.save();
     dashboardCache.timestamp = 0;
-
-    if (session) {
-      await session.commitTransaction();
-      session.endSession();
-    }
 
     eventBus.emit('package.reopened', { pkg, reqUser: req.user, io: req.io });
 
     res.json({ success: true, data: pkg, message: 'Package verification reopened successfully.' });
   } catch (error) {
-    if (session) {
-      await session.abortTransaction();
-      session.endSession();
-    }
+    console.error('Error in reopenPackageAdmin:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
 // POST /api/v1/admin/packages/bulk-verify
 export const bulkVerifyPackagesAdmin = async (req, res) => {
-  let session = null;
-  try {
-    session = await mongoose.startSession();
-    session.startTransaction();
-  } catch (e) {
-    console.warn(`[WARN] MongoDB transaction failed in bulkVerifyPackagesAdmin (likely no replica set). Proceeding without atomicity: ${e.message}`);
-    session = null;
-  }
-
   try {
     const { packageIds } = req.body;
     if (!Array.isArray(packageIds) || packageIds.length === 0) {
-      if (session) await session.abortTransaction();
       return res.status(400).json({ success: false, message: 'No package IDs provided.' });
     }
 
@@ -1763,31 +1736,29 @@ export const bulkVerifyPackagesAdmin = async (req, res) => {
     const now = new Date();
     const nowStrVal = nowStr(now);
 
-    const packages = await Package.find({ _id: { $in: packageIds } }).session(session ? session : null);
+    const packages = await Package.find({ _id: { $in: packageIds } });
     
     if (packages.length !== packageIds.length) {
-      if (session) await session.abortTransaction();
       return res.status(404).json({ success: false, message: 'Some packages were not found.' });
     }
 
     for (const pkg of packages) {
-
       if (pkg.deliveryVerificationStatus === 'Verified') {
         continue; // Skip already verified packages
       }
 
       const draft = pkg.verificationDraft;
-      const status = draft?.status || pkg.riderSubmission?.status || pkg.status;
-      const amount = draft?.amount !== undefined ? draft.amount : (pkg.riderSubmission?.amount !== undefined ? pkg.riderSubmission.amount : pkg.amount);
+      const status = draft?.status || pkg.riderSubmission?.status || pkg.status || 'Delivered';
+      const amount = draft?.amount !== undefined ? draft.amount : (pkg.riderSubmission?.amount !== undefined ? pkg.riderSubmission.amount : (pkg.amount || 0));
       const deliveryCharge = draft?.deliveryCharge !== undefined ? draft.deliveryCharge : pkg.deliveryCharge;
       const comments = draft?.comments !== undefined ? draft.comments : (pkg.riderSubmission?.comments || pkg.comments);
 
-      const originalRiderAmount = pkg.riderSubmission?.amount || pkg.amount;
+      const originalRiderAmount = pkg.riderSubmission?.amount || pkg.amount || 0;
       const difference = amount - originalRiderAmount;
 
       const timelineChanges = [];
 
-      if (difference !== 0) {
+      if (!isNaN(difference) && difference !== 0) {
         pkg.financialAdjustments.push({
           originalAmount: originalRiderAmount,
           adjustedAmount: amount,
@@ -1808,7 +1779,17 @@ export const bulkVerifyPackagesAdmin = async (req, res) => {
       pkg.status = status;
       pkg.amount = amount;
       pkg.deliveryCharge = deliveryCharge;
-      pkg.comments = comments;
+      if (comments && typeof comments === 'string' && comments.trim()) {
+        if (!Array.isArray(pkg.comments)) pkg.comments = [];
+        pkg.comments.push({
+          text: comments.trim(),
+          user: req.user?.name || 'Admin',
+          role: req.user?.role || 'admin',
+          createdAt: now,
+        });
+      } else if (Array.isArray(comments)) {
+        pkg.comments = comments;
+      }
 
       if (draft) {
         pkg.customerName = draft.receiverName || pkg.customerName;
@@ -1867,7 +1848,7 @@ export const bulkVerifyPackagesAdmin = async (req, res) => {
         riderSubmission: pkg.riderSubmission,
         previousAmount: originalRiderAmount,
         updatedAmount: amount,
-        difference,
+        difference: !isNaN(difference) ? difference : 0,
         previousStatus: pkg.riderSubmission?.status || pkg.status,
         updatedStatus: status,
         approvedBy: req.user._id,
@@ -1882,16 +1863,11 @@ export const bulkVerifyPackagesAdmin = async (req, res) => {
         browser: 'Admin Portal',
       });
 
-      await pkg.save(session ? { session } : {});
+      await pkg.save();
       verifiedPackages.push(pkg);
     }
 
-    if (session) {
-      await session.commitTransaction();
-      session.endSession();
-    }
-
-    // Trigger events after successful transaction commit
+    // Trigger events after save
     for (const pkg of verifiedPackages) {
       eventBus.emit('package.verified', {
         pkg,
@@ -1911,10 +1887,7 @@ export const bulkVerifyPackagesAdmin = async (req, res) => {
       message: `Successfully bulk verified ${verifiedPackages.length} packages.`,
     });
   } catch (error) {
-    if (session) {
-      await session.abortTransaction();
-      session.endSession();
-    }
+    console.error('Error in bulkVerifyPackagesAdmin:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -1964,3 +1937,45 @@ export const exportDailyExcel = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+// PUT /api/admin/packages/bulk-status
+export const bulkUpdatePackageStatus = async (req, res) => {
+  try {
+    const { packageIds, status, reason } = req.body;
+    if (!Array.isArray(packageIds) || packageIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'No packages provided.' });
+    }
+    if (!status) {
+      return res.status(400).json({ success: false, message: 'Status is required.' });
+    }
+
+    const packages = await Package.find({ _id: { $in: packageIds } });
+    if (!packages.length) {
+      return res.status(404).json({ success: false, message: 'No matching packages found.' });
+    }
+
+    let updatedCount = 0;
+    for (const pkg of packages) {
+      pkg.status = status;
+      if (status === 'Delivered') {
+        pkg.deliveryDate = new Date();
+      }
+      appendTimelineEvent(pkg, {
+        time: nowStr(),
+        status: status,
+        message: `Status updated to ${status} by ${req.user?.name || 'Admin'}${reason ? `: ${reason}` : ''}`,
+      });
+      await pkg.save();
+      updatedCount++;
+    }
+
+    res.json({
+      success: true,
+      message: `Successfully updated ${updatedCount} package(s) to ${status}.`,
+      data: { count: updatedCount, status }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+

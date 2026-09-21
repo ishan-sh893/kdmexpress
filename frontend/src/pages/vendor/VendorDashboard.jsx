@@ -39,24 +39,13 @@ const titleMap = {
   '/vendor/branches': 'Branch Directory',
 };
 
+import { StatusBadge } from '../../components/ui/StatusBadge';
+
 function statusBadge(status) {
-  const base = "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border";
-  const styles = {
-    'Delivered': 'bg-emerald-50 text-emerald-700 border-emerald-200',
-    'Cancelled': 'bg-red-50 text-red-700 border-red-200',
-    'Returned to Vendor': 'bg-sky-50 text-sky-700 border-sky-200',
-    'Returned': 'bg-sky-50 text-sky-700 border-sky-200',
-    'Pending': 'bg-amber-50 text-amber-700 border-amber-200',
-    'Pick Up Requested': 'bg-amber-50 text-amber-700 border-amber-200',
-    'Picked Up': 'bg-brand-50 text-brand-700 border-brand-200',
-    'In Warehouse': 'bg-brand-50 text-brand-700 border-brand-200',
-    'Out for Delivery': 'bg-brand-50 text-brand-700 border-brand-200',
-    'Postponed': 'bg-amber-50 text-amber-700 border-amber-200'
-  };
-  return <span className={`${base} ${styles[status] || 'bg-slate-100 text-slate-700 border-slate-200'}`}>{status}</span>;
+  return <StatusBadge status={status} />;
 }
 
-const PackageRow = React.memo(({ pkg, isSelected, handleSelect, setViewPackageDetails, setCommentModal, setEditMode, setEditPackageId, setCreateForm, setDrawerOpen }) => {
+const PackageRow = React.memo(({ pkg, isSelected, handleSelect, setViewPackageDetails, setCommentModal, setEditMode, setEditPackageId, setCreateForm, setDrawerOpen, handleSinglePickup }) => {
   return (
     <tr className="hover:bg-slate-50 transition-colors">
       <td className="px-6 py-4">
@@ -74,7 +63,17 @@ const PackageRow = React.memo(({ pkg, isSelected, handleSelect, setViewPackageDe
       <td className="px-6 py-4 font-bold text-brand-600">Rs. {pkg.amount}</td>
       <td className="px-6 py-4 text-slate-500 font-medium">{new Date(pkg.createdAt).toLocaleDateString()}</td>
       <td className="px-6 py-4 text-right">
-        <div className="flex justify-end gap-1">
+        <div className="flex justify-end items-center gap-1.5">
+          {pkg.status === 'Pending' && handleSinglePickup && (
+            <button 
+              onClick={() => handleSinglePickup(pkg._id)} 
+              className="px-2.5 py-1 bg-brand-50 hover:bg-brand-100 text-brand-700 border border-brand-200 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 shadow-2xs" 
+              title="Request courier pickup for this package"
+            >
+              <MapPin className="w-3.5 h-3.5 text-brand-600" />
+              <span>Pickup</span>
+            </button>
+          )}
           <button onClick={()=>setViewPackageDetails(pkg)} className="p-2 text-slate-400 hover:text-brand-600 hover:bg-brand-50 rounded-lg transition-colors" title="View details">
             <Eye className="w-4 h-4" />
           </button>
@@ -207,20 +206,45 @@ const VendorHome = () => {
 const inputClass = "input-field w-full text-base py-2.5";
 const labelClass = "block text-sm font-semibold text-slate-700 mb-1.5";
 
-const SearchableDropdown = ({ value, onChange, options, name, placeholder = "Select..." }) => {
+const SearchableDropdown = ({ value, onChange, options = [], name, placeholder = "Select...", allowCustom = false }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
   const wrapperRef = useRef(null);
 
   useEffect(() => {
     const handleClickOutside = (e) => {
-      if (wrapperRef.current && !wrapperRef.current.contains(e.target)) setIsOpen(false);
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target)) {
+        setIsOpen(false);
+        if (allowCustom && search.trim() && search.trim() !== value) {
+          onChange({ target: { name, value: search.trim() } });
+        }
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  }, [search, value, name, onChange, allowCustom]);
 
-  const filteredOptions = options.filter(opt => opt.toLowerCase().includes(search.toLowerCase()));
+  const safeOptions = Array.isArray(options) ? options : [];
+  const filteredOptions = safeOptions.filter(opt =>
+    String(opt).toLowerCase().includes(search.toLowerCase())
+  );
+
+  const handleSelectOption = (selectedVal) => {
+    onChange({ target: { name, value: selectedVal } });
+    setSearch('');
+    setIsOpen(false);
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (filteredOptions.length > 0) {
+        handleSelectOption(filteredOptions[0]);
+      } else if (allowCustom && search.trim()) {
+        handleSelectOption(search.trim());
+      }
+    }
+  };
 
   return (
     <div ref={wrapperRef} className="relative">
@@ -230,29 +254,162 @@ const SearchableDropdown = ({ value, onChange, options, name, placeholder = "Sel
           className={inputClass}
           style={{ paddingRight: 36 }}
           placeholder={placeholder}
-          value={isOpen ? search : value}
-          onChange={(e) => { setSearch(e.target.value); if(!isOpen) setIsOpen(true); onChange({ target: { name, value: e.target.value } }); }}
-          onClick={() => setIsOpen(true)}
+          value={isOpen ? search : (value || '')}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            if (!isOpen) setIsOpen(true);
+            if (allowCustom) {
+              onChange({ target: { name, value: e.target.value } });
+            }
+          }}
+          onFocus={() => {
+            setSearch(value || '');
+            setIsOpen(true);
+          }}
+          onKeyDown={handleKeyDown}
         />
         <ChevronRight className={`absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 transition-transform ${isOpen ? 'rotate-90' : ''} pointer-events-none`} />
       </div>
       {isOpen && (
-        <div className="absolute top-full left-0 right-0 z-50 bg-white border border-slate-200 rounded-xl shadow-xl max-h-60 overflow-y-auto mt-2 animate-in fade-in zoom-in-95 duration-100">
-          {filteredOptions.length > 0 ? filteredOptions.map((opt, i) => (
-            <div key={i} onClick={() => { onChange({ target: { name, value: opt } }); setSearch(''); setIsOpen(false); }} className={`px-4 py-3 text-sm cursor-pointer border-b border-slate-50 last:border-0 hover:bg-brand-50 transition-colors ${value === opt ? 'bg-brand-50 text-brand-700 font-bold' : 'text-slate-700 font-medium'}`}>
-              {opt}
+        <div className="absolute top-full left-0 right-0 z-50 bg-white border border-slate-200 rounded-xl shadow-xl max-h-64 overflow-y-auto mt-2 animate-in fade-in zoom-in-95 duration-100 divide-y divide-slate-100">
+          {filteredOptions.length > 0 ? (
+            filteredOptions.map((opt, i) => (
+              <div
+                key={i}
+                onClick={() => handleSelectOption(opt)}
+                className={`px-4 py-2.5 text-sm cursor-pointer hover:bg-brand-50 transition-colors ${value === opt ? 'bg-brand-50 text-brand-700 font-bold' : 'text-slate-700 font-medium'}`}
+              >
+                {opt}
+              </div>
+            ))
+          ) : null}
+
+          {/* If custom is explicitly allowed and user typed text */}
+          {allowCustom && search.trim() && (
+            <div
+              onClick={() => handleSelectOption(search.trim())}
+              className="px-4 py-2.5 text-xs text-brand-700 bg-brand-50/70 hover:bg-brand-100 font-bold cursor-pointer transition-colors flex items-center justify-between"
+            >
+              <span>+ Use custom: &quot;{search.trim()}&quot;</span>
+              <span className="text-[10px] bg-brand-200 text-brand-800 px-1.5 py-0.5 rounded font-semibold">Select ↵</span>
             </div>
-          )) : <div className="px-4 py-3 text-sm text-slate-400 italic">No options found</div>}
+          )}
+
+          {filteredOptions.length === 0 && (
+            <div className="px-4 py-3 text-xs text-slate-500 italic text-center">
+              {allowCustom ? 'No matching options found' : 'No matching city in Pricing Engine. Please select from uploaded cities list.'}
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 };
 
-const SIMPLE_BRANCHES = ['HEAD OFFICE', 'Kathmandu Branch', 'Pokhara Branch', 'Chitwan Branch', 'Lalitpur Branch', 'Bhaktapur Branch', 'Dharan Branch', 'Biratnagar Branch'];
+const KATHMANDU_VALLEY_BRANCHES = [
+  'HEAD OFFICE',
+  'HEAD OFFICE (Kathmandu Valley)',
+  'Kathmandu Branch',
+  'Lalitpur Branch',
+  'Bhaktapur Branch'
+];
+
+const ORIGIN_BRANCHES = [
+  'HEAD OFFICE',
+  'Kathmandu Branch',
+  'Lalitpur Branch',
+  'Bhaktapur Branch',
+  'Chitwan Branch',
+  'Pokhara Branch',
+  'Butwal Branch',
+  'Biratnagar Branch',
+  'Birgunj Branch',
+  'Dharan Branch',
+  'Itahari Branch',
+  'Hetauda Branch',
+  'Nepalgunj Branch',
+  'Dhangadhi Branch',
+  'Surkhet Branch',
+  'Janakpur Branch',
+  'Birtamod Branch',
+  'Dang Branch'
+];
+
+const SIMPLE_BRANCHES = [
+  'Kathmandu Branch',
+  'Lalitpur Branch',
+  'Bhaktapur Branch',
+  'Chitwan Branch',
+  'Pokhara Branch',
+  'Butwal Branch',
+  'Biratnagar Branch',
+  'Birgunj Branch',
+  'Dharan Branch',
+  'Itahari Branch',
+  'Hetauda Branch',
+  'Nepalgunj Branch',
+  'Dhangadhi Branch',
+  'Surkhet Branch',
+  'Janakpur Branch',
+  'Birtamod Branch',
+  'Dang Branch',
+  'Outside Valley (All Other Cities)'
+];
+
 const PICKUP_POINTS = ['Koteshwor Hub', 'Baneshwor Hub', 'Thamel Hub', 'Patan Hub', 'Boudha Hub'];
-const KATHMANDU_VALLEY_AREAS = ['Kathmandu', 'Lalitpur', 'Bhaktapur', 'Thamel', 'Patan', 'Boudha', 'Koteshwor', 'Baneshwor', 'Balaju', 'Kirtipur', 'Thankot', 'Budhanilkantha'];
-const OUT_OF_VALLEY_CITIES = ["Argakhachi (Sandhikharka)","Arun Khola (East Nawalparasi)","Attariya (Kailali)","Baglung","Bajura (Kolti)","Banepa (Kavre)","Baniyani (Jhapa)","Bansagadhi (Bardiya)","Bardaghat (Nawalparasi)","Bardibas","Battar Bazar (Nuwakot)","Bauniya (Kailali)","Belauri (Kanchanpur)","Belbari (Morang)","Beltar (Udayapur)","Beni","Bhadrapur (Jhapa)","Bhairahawa","Bhajani (Kailali)","Bhalubang (Dang)","Bhojpur","Bhurigoan (Bardiya)","Bidur (Nuwakot)","Biratchowk (Morang)","Biratnagar","Birgunj","Birtamod (Jhapa)","Budhabare (Jhapa)","Burtibang (Baglung)","Butwal","Chainpur (Bajhang)","Chainpur (Sankhuwasawa)","Chandranigahapur (Rautahat)","Chandrauta (Kapilvastu)","Charaali (Jhapa)","Charikot (Dolakha)","Chinchu (Bheri)","Chisapani (Kailali)","Chormara (East Nawalparasi)","Dadeldhura (Amargadi)","Dailekh Bazar","Daldale (East Nawalparasi)","Damak (Jhapa)","Damauli","Darchula (Khalanga)","Dhading (Besi)","Dhalkebar (Dhanusa)","Dhangadhi (Sudur Paschim)","Dhankuta","Dharan","Dhulabari (Jhapa)","Dhulikhel","Diktel Bazaar (Khotang)","Dipayal Bazar (Doti)","Dodhara Chadani (Kanchanpur)","Dudhauli (Sindhuli)","Duhabi (Sunsari)","Dullu (Dailekh)","Dumkibas (East Nawalparasi)","Dumre","Fikkal","Gaidakot (Nawalparasi East)","Gaighat (Udayapur)","Galkot (Baglung)","Gaur (Rautahat)","Gauradaha (Jhapa)","Gauriganj (Jhapa)","Gaushala (Mahottari)","Ghorahi (Dang)","Gokuleswor (Darchula)","Gorkha (Palungtar)","Gorkha Bazaar","Gothlapani (Baitadi)","Gulariya (Bardiya)","Gulmi (Tamghas)","Haldibari (Jhapa)","Hariwan (Sarlahi)","Hemja (Pokhara)","Hetauda","Hile Bazar (Dhankuta)","Ilam Bazaar","Inaruwa (Sunsari)","Itahari","Jajarkot","Jaleshwor (Mahottari)","Janakpur","Jeetpur (Bara)","Jeetpur No.4 (Kapilvastu)","Jhalari (Kanchanpur)","Jirikhimti (Terahthum)","Jogikuti (Rupandehi)","Jomsom","Joshipur (Kailali)","Jumla (Khalanga)"];
+
+const KATHMANDU_VALLEY_AREAS = [
+  'Kathmandu', 'Lalitpur', 'Bhaktapur', 'Thamel', 'Patan', 'Boudha', 'Koteshwor', 
+  'Baneshwor', 'Balaju', 'Kirtipur', 'Thankot', 'Budhanilkantha', 'New Road', 
+  'Chabahil', 'Jorpati', 'Maharajgunj', 'Gongabu', 'Kalanki', 'Balkhu', 
+  'Satdobato', 'Sanepa', 'Jhamsikhel', 'Lagankhel', 'Suryabinayak', 'Thimi', 
+  'Dillibazar', 'Putalisadak', 'Anamnagar', 'Bansbari', 'Tokha', 'Sundarijal', 
+  'Sankhu', 'Dakshinkali', 'Godawari', 'Lubhu', 'Sanothimi', 'Lokanthali', 
+  'Gatthaghar', 'Kaushaltar', 'Balkot', 'Sallaghari', 'Kamalbinayak'
+];
+
+const CHITWAN_AREAS = [
+  'Chitwan', 'Bharatpur (Chitwan)', 'Narayangarh (Chitwan)', 'Ratnanagar / Tandi (Chitwan)', 
+  'Parsa (Chitwan)', 'Sauraha (Chitwan)', 'Gaindakot (Nawalparasi East)', 'Kawashoti (Nawalparasi East)', 
+  'Madi (Chitwan)', 'Geetanagar (Chitwan)', 'Chanauli (Chitwan)', 'Meghauli (Chitwan)', 'Rampur (Chitwan)'
+];
+
+const POKHARA_AREAS = [
+  'Pokhara', 'Lakeside (Pokhara)', 'Mahendrapool (Pokhara)', 'Chipledhunga (Pokhara)', 
+  'Prithvi Chowk (Pokhara)', 'Hemja (Pokhara)', 'Lekhnath (Pokhara)', 'Birauta (Pokhara)', 
+  'Bagar (Pokhara)', 'Amar Singh Chowk (Pokhara)', 'Lamachaur (Pokhara)'
+];
+
+const BIRATNAGAR_AREAS = [
+  'Biratnagar', 'Main Road (Biratnagar)', 'Traffic Chowk (Biratnagar)', 'Rani (Biratnagar)', 
+  'Kanchanbari (Biratnagar)', 'Duhabi (Sunsari)', 'Belbari (Morang)', 'Biratchowk (Morang)', 
+  'Itahari', 'Dharan', 'Bhadrapur (Jhapa)', 'Birtamod (Jhapa)', 'Damak (Jhapa)'
+];
+
+const BUTWAL_AREAS = [
+  'Butwal', 'Traffic Chowk (Butwal)', 'Golpark (Butwal)', 'Kalikanagar (Butwal)', 
+  'Jogikuti (Rupandehi)', 'Bhairahawa', 'Manigram (Rupandehi)', 'Tilottama', 'Bardaghat'
+];
+
+const getAreaOptionsForBranch = (branch, dynamicCities = []) => {
+  if (!branch || branch === '--------' || KATHMANDU_VALLEY_BRANCHES.includes(branch)) {
+    return KATHMANDU_VALLEY_AREAS;
+  }
+  if (branch === 'Chitwan Branch') {
+    return CHITWAN_AREAS;
+  }
+  if (branch === 'Pokhara Branch') {
+    return POKHARA_AREAS;
+  }
+  if (branch === 'Biratnagar Branch' || branch === 'Dharan Branch' || branch === 'Itahari Branch') {
+    return BIRATNAGAR_AREAS;
+  }
+  if (branch === 'Butwal Branch') {
+    return BUTWAL_AREAS;
+  }
+  // Strictly return all cities configured in the Pricing Engine database
+  return Array.isArray(dynamicCities) && dynamicCities.length > 0 ? dynamicCities : [];
+};
 
 // ─── Package List ─────────────────────────────────────────────────────────
 const EMPTY_FORM = {
@@ -298,8 +455,19 @@ const PackageList = () => {
   const [viewPackageDetails, setViewPackageDetails] = useState(null);
   const [printPackages, setPrintPackages] = useState([]);
   const [scannerOpen, setScannerOpen] = useState(false);
+  const [availableCities, setAvailableCities] = useState([]);
   const printRef = useRef();
   const { showToast } = useToast();
+
+  useEffect(() => {
+    api.get('/delivery-charges/cities')
+      .then(res => {
+        if (res.data?.data && Array.isArray(res.data.data)) {
+          setAvailableCities(res.data.data.map(c => c.city));
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const fetchNextInvoiceId = async () => {
     try {
@@ -317,7 +485,7 @@ const PackageList = () => {
     setEditMode(false);
     setEditPackageId(null);
     const nextId = await fetchNextInvoiceId();
-    setCreateForm({ ...EMPTY_FORM, invoiceId: nextId });
+    setCreateForm({ ...EMPTY_FORM, destinationBranch: 'Kathmandu Branch', city: 'Kathmandu', invoiceId: nextId });
     setDrawerOpen(true);
   };
 
@@ -383,18 +551,26 @@ const PackageList = () => {
 
   const requestPickup = async () => {
     if (!selected.length) return;
-    
-    // Optimistic Update
-    setPackages(prev => prev.map(p => selected.includes(p._id) ? { ...p, status: 'Pick Up Requested' } : p));
-    
     try { 
-      await api.post('/vendor/pickup-request',{packageIds:selected}); 
-      showToast('Pickup requested!','success'); 
+      const res = await api.post('/vendor/pickup-request', { packageIds: selected }); 
+      showToast(res.data?.message || `✓ Pickup requested for ${selected.length} package(s)!`, 'success'); 
       setSelected([]); 
       fetchPackages(true); 
     }
     catch(e) { 
-      showToast(e.message||'Failed to request pickup','error'); 
+      showToast(e.response?.data?.message || e.message || 'Failed to request pickup', 'error'); 
+      fetchPackages(true);
+    }
+  };
+
+  const handleSinglePickup = async (pkgId) => {
+    try {
+      const res = await api.post('/vendor/pickup-request', { packageIds: [pkgId] });
+      showToast(res.data?.message || '✓ Pickup requested for package!', 'success');
+      setSelected(prev => prev.filter(id => id !== pkgId));
+      fetchPackages(true);
+    } catch(e) {
+      showToast(e.response?.data?.message || e.message || 'Failed to request pickup', 'error');
       fetchPackages(true);
     }
   };
@@ -422,6 +598,29 @@ const PackageList = () => {
     
     setCreateForm(f => {
       const next = { ...f, [name]: finalValue };
+      
+      // Smart Auto-selection for Destination Branch
+      if (name === 'destinationBranch') {
+        if (value === 'Chitwan Branch') {
+          next.city = 'Chitwan';
+          next.outOfValley = true;
+        } else if (value === 'Pokhara Branch') {
+          next.city = 'Pokhara';
+          next.outOfValley = true;
+        } else if (value === 'Biratnagar Branch') {
+          next.city = 'Biratnagar';
+          next.outOfValley = true;
+        } else if (value === 'Butwal Branch') {
+          next.city = 'Butwal';
+          next.outOfValley = true;
+        } else if (KATHMANDU_VALLEY_BRANCHES.includes(value)) {
+          next.city = 'Kathmandu';
+          next.outOfValley = false;
+        } else {
+          next.outOfValley = true;
+        }
+      }
+
       // IF package_amount = 0 THEN vendor_delivery_charge = applicable_delivery_fee
       if (name === 'amount' && Number(finalValue) === 0 && fetchedCharge !== null) {
         next.deliveryCharge = fetchedCharge;
@@ -434,7 +633,10 @@ const PackageList = () => {
   const validateForm = () => {
     const errors = {};
     if (!createForm.branch) errors.branch = "Branch is required";
-    if (!createForm.destinationBranch || createForm.destinationBranch === '--------') errors.destinationBranch = "Destination Branch is required";
+    const isOutOfValley = !KATHMANDU_VALLEY_BRANCHES.includes(createForm.destinationBranch) && createForm.destinationBranch !== '--------';
+    if (isOutOfValley && (!createForm.city || !createForm.city.trim())) {
+      errors.city = "Destination city is required for Outside Valley delivery";
+    }
     if (!createForm.customerName.trim()) errors.customerName = "Receiver Name is required";
     if (!createForm.customerPhone) errors.customerPhone = "Receiver Phone Number is required";
     if (!createForm.address.trim()) errors.address = "Receiver Full Address is required";
@@ -452,13 +654,14 @@ const PackageList = () => {
 
     setCreateLoading(true);
     try {
+      const isOutOfValley = !KATHMANDU_VALLEY_BRANCHES.includes(createForm.destinationBranch) && createForm.destinationBranch !== '--------';
       const payload = {
         invoiceId: createForm.invoiceId,
         customerName: createForm.customerName,
         customerPhone: createForm.customerPhone,
         address: createForm.address,
         city: createForm.city || createForm.destinationBranch,
-        outOfValley: createForm.outOfValley || (createForm.destinationBranch !== 'HEAD OFFICE' && createForm.destinationBranch !== '--------'),
+        outOfValley: Boolean(createForm.outOfValley || isOutOfValley),
         weight: Number(createForm.weight),
         amount: Number(createForm.amount),
         deliveryCharge: Number(createForm.deliveryCharge),
@@ -550,7 +753,7 @@ const PackageList = () => {
           </div>
           <select className="input-field w-full md:w-48 text-sm" value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}>
             <option value="all">All Statuses</option>
-            {['Pending','Pick Up Requested','In Warehouse','Out for Delivery','Delivered','Cancelled','Returned to Vendor'].map(s=><option key={s} value={s}>{s}</option>)}
+            {['Pending','Picked Up','Warehouse','Dispatched','Out for Delivery','Delivered','Postponed','Returned','Exchange'].map(s=><option key={s} value={s}>{s}</option>)}
           </select>
         </div>
       </div>
@@ -580,6 +783,7 @@ const PackageList = () => {
                   pkg={pkg} 
                   isSelected={selected.includes(pkg._id)}
                   handleSelect={handleSelect}
+                  handleSinglePickup={handleSinglePickup}
                   setViewPackageDetails={setViewPackageDetails}
                   setCommentModal={setCommentModal}
                   setEditMode={setEditMode}
@@ -745,9 +949,9 @@ const PackageList = () => {
                 <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Package Info</h4>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
                   <div><div className="text-xs font-medium text-slate-500 mb-1">Weight</div><div className="font-bold text-slate-900">{viewPackageDetails.weight} kg</div></div>
-                  <div><div className="text-xs font-medium text-slate-500 mb-1">Package Type</div><div className="font-bold text-slate-900 truncate" title={viewPackageDetails.packageType}>{viewPackageDetails.packageType || 'N/A'}</div></div>
+                  <div><div className="text-xs font-medium text-slate-500 mb-1">Package Type</div><div className="font-bold text-slate-900 truncate" title={viewPackageDetails.packageType}>{viewPackageDetails.packageType || viewPackageDetails.items?.[0]?.name || 'Standard Parcel'}</div></div>
                   <div><div className="text-xs font-medium text-slate-500 mb-1">Invoice ID</div><div className="font-bold text-slate-900">{viewPackageDetails.invoiceId || 'N/A'}</div></div>
-                  <div><div className="text-xs font-medium text-slate-500 mb-1">Destination</div><div className="font-bold text-slate-900 truncate" title={viewPackageDetails.destinationBranch}>{viewPackageDetails.destinationBranch || 'N/A'}</div></div>
+                  <div><div className="text-xs font-medium text-slate-500 mb-1">Destination</div><div className="font-bold text-slate-900 truncate" title={viewPackageDetails.city || viewPackageDetails.destinationBranch || viewPackageDetails.address}>{viewPackageDetails.city || viewPackageDetails.destinationBranch || (viewPackageDetails.outOfValley ? 'Outside Valley' : 'Kathmandu Valley')}</div></div>
                   <div><div className="text-xs font-medium text-slate-500 mb-1">Access</div><div className="font-bold text-slate-900">{viewPackageDetails.packageAccess || 'Sealed'}</div></div>
                   <div><div className="text-xs font-medium text-slate-500 mb-1">Created Date</div><div className="font-bold text-slate-900">{new Date(viewPackageDetails.createdAt).toLocaleDateString()}</div></div>
                 </div>
@@ -858,15 +1062,30 @@ const PackageList = () => {
                   </div>
                   
                   <div className="space-y-5">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                       <div>
-                        <label className={labelClass}>City / Branch <span className="text-red-500">*</span></label>
+                        <label className={labelClass}>From Branch (Origin) <span className="text-red-500">*</span></label>
+                        <SearchableDropdown name="branch" value={f.branch} onChange={handleFormChange} options={ORIGIN_BRANCHES} placeholder="Select origin branch" />
+                        {formErrors.branch && <span className="text-xs text-red-500 mt-1.5 block font-medium">{formErrors.branch}</span>}
+                      </div>
+                      <div>
+                        <label className={labelClass}>To Branch (Destination) <span className="text-red-500">*</span></label>
                         <SearchableDropdown name="destinationBranch" value={f.destinationBranch} onChange={handleFormChange} options={SIMPLE_BRANCHES} placeholder="Select nearest branch" />
                         {formErrors.destinationBranch && <span className="text-xs text-red-500 mt-1.5 block font-medium">{formErrors.destinationBranch}</span>}
                       </div>
                       <div>
-                        <label className={labelClass}>Area / Sub-city</label>
-                        <SearchableDropdown name="city" value={f.city} onChange={handleFormChange} options={f.destinationBranch === 'HEAD OFFICE' ? KATHMANDU_VALLEY_AREAS : OUT_OF_VALLEY_CITIES} placeholder="Select area" />
+                        <label className={labelClass}>
+                          Destination City / Area {!KATHMANDU_VALLEY_BRANCHES.includes(f.destinationBranch) && f.destinationBranch !== '--------' ? <span className="text-red-500">* (Pricing Engine)</span> : ''}
+                        </label>
+                        <SearchableDropdown 
+                          name="city" 
+                          value={f.city} 
+                          onChange={handleFormChange} 
+                          options={getAreaOptionsForBranch(f.destinationBranch, availableCities)} 
+                          placeholder={!KATHMANDU_VALLEY_BRANCHES.includes(f.destinationBranch) ? "Select configured city..." : "Select or search area..."}
+                          allowCustom={KATHMANDU_VALLEY_BRANCHES.includes(f.destinationBranch) || f.destinationBranch === '--------'}
+                        />
+                        {formErrors.city && <span className="text-xs text-red-500 mt-1.5 block font-medium">{formErrors.city}</span>}
                       </div>
                     </div>
                   </div>

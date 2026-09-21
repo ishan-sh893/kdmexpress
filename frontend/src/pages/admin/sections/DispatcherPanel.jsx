@@ -14,22 +14,11 @@ import {
   Edit2, Trash2, Check, X, Bell
 } from 'lucide-react';
 
+import { StatusBadge, ALLOWED_STATUSES } from '../../../components/ui/StatusBadge';
+
 // ─── Status Badge ───────────────────────────────────────────────────────────
 function statusBadge(status) {
-  const styles = {
-    'Delivered': 'bg-emerald-100 text-emerald-700 border-emerald-200',
-    'Cancelled': 'bg-red-100 text-red-700 border-red-200',
-    'Returned': 'bg-sky-100 text-sky-700 border-sky-200',
-    'Returned to Vendor': 'bg-sky-100 text-sky-700 border-sky-200',
-    'Pending': 'bg-amber-100 text-amber-700 border-amber-200',
-    'Pick Up Requested': 'bg-amber-100 text-amber-700 border-amber-200',
-    'Picked Up': 'bg-brand-100 text-brand-700 border-brand-200',
-    'In Warehouse': 'bg-brand-100 text-brand-700 border-brand-200',
-    'Out for Delivery': 'bg-brand-100 text-brand-700 border-brand-200',
-    'Postponed': 'bg-orange-100 text-orange-700 border-orange-200',
-  };
-  const style = styles[status] || 'bg-slate-100 text-slate-700 border-slate-200';
-  return <span className={'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border ' + style}>{status}</span>;
+  return <StatusBadge status={status} />;
 }
 
 const AdminDispatcher = () => {
@@ -262,7 +251,7 @@ const AdminDispatcher = () => {
 
   const filteredWarehousePackages = warehousePackages.filter(p => {
     if (warehouseRiderFilter !== 'all') {
-      if (warehouseRiderFilter === 'postponed' || warehouseRiderFilter === 'unassigned') {
+      if (warehouseRiderFilter === 'unassigned') {
         if (p.riderId) return false;
       } else {
         const rId = p.riderId?._id || p.riderId;
@@ -328,8 +317,9 @@ const AdminDispatcher = () => {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 animate-scaleIn">
           <MetricCard title="Pending Pickups" value={stats.pickupsPending ?? 0} color="warning" icon={<span className="text-2xl">🚚</span>} />
           <MetricCard title="In Warehouse" value={stats.inWarehouse ?? 0} color="purple" icon={<span className="text-2xl">🏭</span>} />
-          <MetricCard title="Postponed" value={stats.unassigned ?? 0} color="danger" icon={<span className="text-2xl">⚠️</span>} />
+          <MetricCard title="Unassigned" value={stats.unassigned ?? 0} color="slate" icon={<span className="text-2xl">📋</span>} />
           <MetricCard title="Out for Delivery" value={stats.outForDelivery ?? 0} color="info" icon={<span className="text-2xl">📦</span>} />
+          <MetricCard title="Postponed" value={stats.postponed ?? 0} color="danger" icon={<span className="text-2xl">⚠️</span>} />
           <MetricCard title="Returns Pending" value={stats.returnedPending ?? 0} color="warning" icon={<span className="text-2xl">↩️</span>} />
           <MetricCard title="Active Riders" value={stats.activeRiders ?? 0} color="success" icon={<span className="text-2xl">🏍️</span>} />
         </div>
@@ -459,33 +449,31 @@ const AdminDispatcher = () => {
       {activeTab === 'warehouse' && (
         <div className="space-y-4 animate-fadeInUp">
           {selected.length > 0 && (
-            <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 px-5 flex flex-wrap items-center justify-between gap-3">
-              <span className="text-xs font-bold text-blue-800">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 px-5 flex flex-wrap items-center justify-between gap-3 text-white">
+              <span className="text-xs font-bold text-slate-200 tracking-wider uppercase">
                 {selected.length} package(s) selected
               </span>
-              <div className="flex items-center gap-2 flex-wrap">
-                <button
-                  onClick={() => handleBulkStatusChange('In Warehouse')}
-                  disabled={bulkStatusLoading}
-                  className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs rounded-lg transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  🏬 Return to Warehouse
-                </button>
-                <button
-                  onClick={() => handleBulkStatusChange('Out for Delivery')}
-                  disabled={bulkStatusLoading}
-                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs rounded-lg transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  🚀 Dispatched
-                </button>
-                <button
-                  onClick={() => handleBulkStatusChange('Delivered')}
-                  disabled={bulkStatusLoading}
-                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs rounded-lg transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  ✅ Delivered
-                </button>
-                <button onClick={() => setSelected([])} className="text-xs text-slate-500 hover:text-slate-700 ml-2">Clear</button>
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold text-slate-300">Quick Action:</span>
+                  <select
+                    disabled={bulkStatusLoading}
+                    defaultValue=""
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        handleBulkStatusChange(e.target.value);
+                        e.target.value = "";
+                      }
+                    }}
+                    className="bg-slate-800 text-white text-xs font-bold px-3 py-1.5 rounded-lg border border-slate-700 focus:outline-none focus:ring-2 focus:ring-brand-500 cursor-pointer"
+                  >
+                    <option value="" disabled>{bulkStatusLoading ? 'Updating...' : 'Change Status...'}</option>
+                    {ALLOWED_STATUSES.map(st => (
+                      <option key={st} value={st}>{st}</option>
+                    ))}
+                  </select>
+                </div>
+                <button onClick={() => setSelected([])} className="text-xs text-slate-400 hover:text-slate-200 font-semibold px-2 py-1">Deselect</button>
               </div>
             </div>
           )}
@@ -520,7 +508,7 @@ const AdminDispatcher = () => {
                   className="input-field py-1.5 text-xs w-40"
                 >
                   <option value="all">All Riders</option>
-                  <option value="postponed">⚠️ Postponed (No Rider)</option>
+                  <option value="unassigned">📋 Unassigned (No Rider)</option>
                   {riders.map(r => (
                     <option key={r._id} value={r._id}>{r.name}</option>
                   ))}

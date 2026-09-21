@@ -108,9 +108,29 @@ export const getVendorPackages = async (req, res) => {
       if (status === 'pickups') {
         filter.status = { $in: ['Pending', 'Pick Up Requested', 'Picked Up'] };
       } else if (status === 'deliveries') {
-        filter.status = { $in: ['In Warehouse', 'Out for Delivery', 'Delivered', 'Returned to Vendor', 'Returned', 'Cancelled', 'Postponed'] };
+        filter.status = { $in: ['Warehouse', 'In Warehouse', 'Out for Delivery', 'Delivered', 'Returned to Vendor', 'Returned', 'Cancelled', 'Postponed', 'Dispatched', 'Arrived', 'Exchange'] };
       } else if (status === 'history') {
-        filter.status = { $in: ['Delivered', 'Cancelled', 'Returned to Vendor', 'Returned'] };
+        filter.status = { $in: ['Delivered', 'Cancelled', 'Returned to Vendor', 'Returned', 'Exchange'] };
+      } else if (status === 'Pick Up Requested') {
+        const pickupPkgIds = await PickupRequest.find({ vendorId }).distinct('packageId');
+        filter.$or = [
+          { status: 'Pick Up Requested' },
+          { _id: { $in: pickupPkgIds } }
+        ];
+      } else if (status === 'Pending') {
+        filter.status = 'Pending';
+      } else if (status === 'Warehouse') {
+        filter.status = { $in: ['Warehouse', 'In Warehouse', 'Sorted'] };
+      } else if (status === 'Returned') {
+        filter.status = { $in: ['Returned', 'Returned to Vendor', 'Cancelled'] };
+      } else if (status === 'Exchange') {
+        filter.status = { $in: ['Exchange', 'Exchanged'] };
+      } else if (status === 'Arrived') {
+        filter.status = { $in: ['Arrived', 'Arrive'] };
+      } else if (status === 'Dispatched') {
+        filter.status = { $in: ['Dispatched', 'Dispatch'] };
+      } else if (status === 'Out for Delivery') {
+        filter.status = { $in: ['Out for Delivery', 'Out of Delivery'] };
       } else {
         filter.status = status;
       }
@@ -175,8 +195,15 @@ export const createPickupRequest = async (req, res) => {
     const packages = await Package.find({
       _id: { $in: packageIds },
       vendorId,
-      status: 'Pending'
+      status: { $in: ['Pending', 'Pick Up Requested'] }
     });
+
+    if (!packages.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'No eligible pending packages found for pickup.',
+      });
+    }
 
     const now = nowStr();
     for (const pkg of packages) {
@@ -185,14 +212,23 @@ export const createPickupRequest = async (req, res) => {
         time: now,
         status: 'Pick Up Requested',
         message: 'Vendor requested courier pickup',
-        user: req.user.name,
+        user: req.user.name || 'Vendor',
       });
       await pkg.save();
 
-      const pickup = await PickupRequest.create({
-        packageId: pkg._id,
-        vendorId,
-      });
+      let pickup = await PickupRequest.findOne({ packageId: pkg._id });
+      if (!pickup) {
+        pickup = await PickupRequest.create({
+          packageId: pkg._id,
+          vendorId,
+          status: 'pending',
+          requestedAt: new Date()
+        });
+      } else if (pickup.status !== 'completed' && pickup.status !== 'picked_up') {
+        pickup.status = 'pending';
+        pickup.requestedAt = new Date();
+        await pickup.save();
+      }
 
       results.push({ packageId: pkg._id, trackingCode: pkg.trackingCode, pickupId: pickup._id });
     }
@@ -205,7 +241,7 @@ export const createPickupRequest = async (req, res) => {
       });
     }
 
-    res.status(201).json({ success: true, data: results });
+    res.status(201).json({ success: true, message: `Pickup requested for ${results.length} package(s).`, data: results });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -221,17 +257,25 @@ export const createPackage = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Customer name, phone, address, and amount are required.' });
     }
 
-    let finalDeliveryCharge;
-    try {
-      finalDeliveryCharge = await calculateDeliveryFee({
-        vendorId,
-        outOfValley: !!outOfValley,
-        city: city || '',
-        weight: weight || 0.5
-      });
-    } catch (e) {
-      logger.error('Pricing calculation failed', e);
-      finalDeliveryCharge = 0;
+    let finalDeliveryCharge = Number(deliveryCharge);
+    let isUnconfigured = false;
+
+    if (isNaN(finalDeliveryCharge) || finalDeliveryCharge <= 0) {
+      try {
+        const { calculateDeliveryFeeDetails } = await import('../services/pricingService.js');
+        const feeDetails = await calculateDeliveryFeeDetails({
+          vendorId,
+          outOfValley: !!outOfValley,
+          city: city || '',
+          weight: Number(weight) || 0.5
+        });
+        finalDeliveryCharge = feeDetails.fee;
+        isUnconfigured = feeDetails.isUnconfigured;
+      } catch (e) {
+        logger.error('Pricing calculation failed', e);
+        finalDeliveryCharge = outOfValley ? 200 : 100;
+        isUnconfigured = true;
+      }
     }
 
     const trackingCode = await uniqueTrackingCode();
@@ -251,6 +295,7 @@ export const createPackage = async (req, res) => {
       items: items || [],
       amount: Number(amount),
       deliveryCharge: finalDeliveryCharge,
+      isRateUnconfigured: isUnconfigured,
       vendorReceivable: Math.max(0, Number(amount) - finalDeliveryCharge),
       deliveryDate: deliveryDate ? new Date(deliveryDate) : null,
       vendorId,
@@ -265,6 +310,23 @@ export const createPackage = async (req, res) => {
     });
 
     if (req.io) {
+      // 🚨 High Alert to Admin & Dispatcher if delivery fee was unconfigured
+      if (isUnconfigured) {
+        req.io.to('role_admin').to('role_dispatcher').emit('notification', {
+          id: `missing_rate_${pkg._id}_${Date.now()}`,
+          title: '🚨 HIGH ALERT: Unconfigured Delivery Rate',
+          message: `⚠️ HIGH ALERT: Package ${pkg.trackingCode} for "${pkg.city || pkg.address}" has NO configured delivery fee in Pricing Engine! Please review and set rate.`,
+          type: 'error',
+          priority: 'high',
+          packageId: pkg._id,
+          trackingCode: pkg.trackingCode,
+          destination: pkg.city || pkg.address,
+          vendorName: req.user.name,
+          path: '/admin/pricing-engine',
+          createdAt: new Date().toISOString()
+        });
+      }
+
       req.io.to('role_admin').emit('notification', {
         title: 'New Order Created',
         message: `Vendor ${req.user.name} created order ${pkg.trackingCode}`,
@@ -303,10 +365,11 @@ export const updatePackage = async (req, res) => {
       updates.push('Address');
       pkg.address = address;
     }
-    if (comments !== undefined && comments !== pkg.comments) {
-      changes.push({ field: 'Comments', before: pkg.comments, after: comments });
+    if (comments !== undefined && comments !== null && typeof comments === 'string' && comments.trim()) {
+      changes.push({ field: 'Comments', before: 'Updated comments', after: comments.trim() });
       updates.push('Comments');
-      pkg.comments = comments;
+      if (!Array.isArray(pkg.comments)) pkg.comments = [];
+      pkg.comments.push({ text: comments.trim(), user: req.user.name || 'Vendor', role: 'vendor', createdAt: new Date() });
     }
     if (outOfValley !== undefined && outOfValley !== pkg.outOfValley) {
       changes.push({ field: 'Out of Valley', before: pkg.outOfValley, after: outOfValley });
@@ -368,18 +431,20 @@ export const bulkCreatePackages = async (req, res) => {
       const trackingCode = trackingCodes[i];
       const labelUrls = generateLabelUrls(trackingCode);
       
-      let finalDeliveryCharge;
-      try {
-        finalDeliveryCharge = await calculateDeliveryFee({
-          vendorId,
-          outOfValley: !!p.outOfValley,
-          city: p.city || '',
-          weight: Number(p.weight) || 0.5,
-          _vendor: vendor,
-          _globalSettings: globalSettings,
-        });
-      } catch (e) {
-        finalDeliveryCharge = 0;
+      let finalDeliveryCharge = Number(p.deliveryCharge);
+      if (isNaN(finalDeliveryCharge) || finalDeliveryCharge <= 0) {
+        try {
+          finalDeliveryCharge = await calculateDeliveryFee({
+            vendorId,
+            outOfValley: !!p.outOfValley,
+            city: p.city || '',
+            weight: Number(p.weight) || 0.5,
+            _vendor: vendor,
+            _globalSettings: globalSettings,
+          });
+        } catch (e) {
+          finalDeliveryCharge = p.outOfValley ? 200 : 100;
+        }
       }
 
       packageDocs.push({
@@ -456,9 +521,8 @@ export const addComment = async (req, res) => {
     const { text } = req.body;
     
     const pkg = await Package.findOne({ _id: req.params.id, vendorId });
-    if (!pkg) return res.status(404).json({ success: false, message: 'Package not found' });
-
-    pkg.comments = pkg.comments ? `${pkg.comments}\n[${req.user.name}]: ${text}` : `[${req.user.name}]: ${text}`;
+    if (!Array.isArray(pkg.comments)) pkg.comments = [];
+    pkg.comments.push({ text: text.trim(), user: req.user.name || 'Vendor', role: 'vendor', createdAt: new Date() });
     await pkg.save();
     
     res.json({ success: true, data: pkg });

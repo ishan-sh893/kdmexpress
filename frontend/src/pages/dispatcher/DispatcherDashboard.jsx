@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback, useMemo, Suspense, lazy } from 'react';
-import { Routes, Route, useLocation, useNavigate } from 'react-router-dom';
+import React, { useState, useEffect, useCallback, useMemo, Suspense } from 'react';
+import { Routes, Route, useLocation, useNavigate, Navigate } from 'react-router-dom';
 import AppShell from '../../layouts/AppShell';
 import MetricCard from '../../components/MetricCard';
 import ScanStation from '../../components/ScanStation';
@@ -12,65 +12,44 @@ import SearchPanel from '../../components/SearchPanel';
 import { useTrackingDrawer } from '../../store/TrackingDrawerContext';
 import PackageTimeline from '../../components/PackageTimeline';
 
-const PackageManagement = lazy(() => import('../admin/sections/PackageManagement'));
-
 const SectionLoader = () => (
   <div className="flex items-center justify-center p-16">
     <div className="w-8 h-8 border-2 border-slate-200 border-t-slate-900 rounded-full animate-spin"></div>
   </div>
 );
+
+const ExpenseLog = React.lazy(() => import('../admin/sections/ExpenseLog'));
+
 import {
-  LayoutDashboard, Package, Truck, RotateCcw, Bike, Wallet,
+  LayoutDashboard, Package, Truck, RotateCcw, Bike, Wallet, Receipt,
   Search, CheckCircle2, XCircle, Clock, AlertCircle, Eye,
   ChevronDown, ChevronUp, QrCode, RefreshCw, Filter, Check, X,
-  Store, ArrowDownLeft, ArrowUpRight
+  Store, ArrowDownLeft, ArrowUpRight, Plus, FileSpreadsheet, Download, AlertTriangle, Printer
 } from 'lucide-react';
+import PrintLabelsModal from '../../components/PrintLabelsModal';
 
 // ─── Nav + Title Map ──────────────────────────────────────────────────────
 const navLinks = [
   { name: 'Dashboard', path: '/dispatcher', exact: true, icon: <LayoutDashboard className="w-[18px] h-[18px]" /> },
-  { name: 'All Packages', path: '/dispatcher/packages', icon: <Package className="w-[18px] h-[18px]" /> },
   { name: 'Tasks (Pickup & Delivery)', path: '/dispatcher/tasks', icon: <Truck className="w-[18px] h-[18px]" /> },
   { name: 'Reverse Logistics', path: '/dispatcher/reverse-logistics', icon: <RotateCcw className="w-[18px] h-[18px]" /> },
   { name: 'Active Riders', path: '/dispatcher/riders', icon: <Bike className="w-[18px] h-[18px]" /> },
   { name: 'COD Handovers', path: '/dispatcher/handovers', icon: <Wallet className="w-[18px] h-[18px]" /> },
+  { name: 'Rider Expenses', path: '/dispatcher/expenses', icon: <Receipt className="w-[18px] h-[18px]" /> },
 ];
 
 const titleMap = {
-  '/dispatcher/packages':        'All Packages Overview',
   '/dispatcher/tasks':           'Tasks (Pickup & Delivery)',
   '/dispatcher/reverse-logistics': 'Reverse Logistics (RTV)',
   '/dispatcher/riders':          'Active Riders Overview',
   '/dispatcher/handovers':       'COD Reconciliation & Handover',
+  '/dispatcher/expenses':        'Rider Expenses Log',
   '/dispatcher/scan-station':    'Warehouse Scan Station',
   '/dispatcher/inbound-scan':    'Inbound & Sorting Station',
   '/dispatcher':                 'Warehouse Management Overview',
 };
 
-// ─── Status Badge ─────────────────────────────────────────────────────────
-function StatusBadge({ status }) {
-  const base = "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border";
-  const styles = {
-    'Delivered':           'bg-emerald-50 text-emerald-700 border-emerald-200',
-    'In Warehouse':        'bg-slate-100 text-slate-800 border-slate-300',
-    'Out for Delivery':    'bg-sky-50 text-sky-700 border-sky-200',
-    'Picked Up':           'bg-amber-50 text-amber-700 border-amber-200',
-    'Pick Up Requested':   'bg-amber-50 text-amber-700 border-amber-200',
-    'Postponed':           'bg-orange-50 text-orange-700 border-orange-200',
-    'Cancelled':           'bg-red-50 text-red-700 border-red-200',
-    'Returned':            'bg-slate-100 text-slate-700 border-slate-200',
-    'Returned to Vendor':  'bg-slate-100 text-slate-700 border-slate-200',
-    'Pending':             'bg-amber-50 text-amber-700 border-amber-200',
-    'Hold':                'bg-rose-50 text-rose-700 border-rose-200',
-  };
-  return (
-    <span className={`${base} ${styles[status] || 'bg-slate-100 text-slate-700 border-slate-200'}`}>
-      {status === 'Delivered' && '✓ '}
-      {status === 'Cancelled' && '✕ '}
-      {status}
-    </span>
-  );
-}
+import { StatusBadge, ALLOWED_STATUSES } from '../../components/ui/StatusBadge';
 
 function Spinner() {
   return (
@@ -136,6 +115,109 @@ const DispatcherHome = () => {
   const { showToast } = useToast();
   const navigate = useNavigate();
 
+  // Create Order, CSV Upload, & Excel Export states
+  const [createModal, setCreateModal] = useState(false);
+  const [csvModal, setCsvModal] = useState(false);
+  const [printLabelsModalOpen, setPrintLabelsModalOpen] = useState(false);
+  const [vendors, setVendors] = useState([]);
+  const [newPkg, setNewPkg] = useState({ vendorId: '', customerName: '', customerPhone: '', address: '', city: '', amount: '', weight: '0.5', deliveryDate: '' });
+  const [csvVendorId, setCsvVendorId] = useState('');
+  const [csvFile, setCsvFile] = useState(null);
+  const [csvUploading, setCsvUploading] = useState(false);
+
+  const fetchVendors = async () => {
+    try {
+      const res = await api.get('/admin/users?role=vendor');
+      setVendors(res.data.data || []);
+    } catch (e) {
+      console.error('Failed to load vendors', e);
+    }
+  };
+
+  const handleCreate = async (e) => {
+    e.preventDefault();
+    try {
+      setCreateModal(false);
+      await api.post('/admin/packages', {
+        ...newPkg,
+        amount: Number(newPkg.amount),
+        weight: Number(newPkg.weight),
+        deliveryDate: newPkg.deliveryDate || null
+      });
+      showToast('Package created successfully', 'success');
+      setNewPkg({ vendorId: '', customerName: '', customerPhone: '', address: '', city: '', amount: '', weight: '0.5', deliveryDate: '' });
+      fetchAll();
+    } catch (err) {
+      showToast(err.message || 'Failed to create package', 'error');
+      fetchAll();
+    }
+  };
+
+  const downloadSampleCsv = () => {
+    const headers = ['customer name', 'address', 'customerPhone', 'city', 'amount', 'weight', 'delivery charge', 'out of valley'];
+    const sampleRow1 = ['Ram Sharma', 'New Road, Kathmandu', '9841234567', 'Kathmandu', '1500', '0.5', '100', 'false'];
+    const sampleRow2 = ['Sita Thapa', 'Lakeside, Pokhara', '9801234567', 'Pokhara', '2500', '1.0', '200', 'true'];
+    const csvContent = [headers.join(','), sampleRow1.join(','), sampleRow2.join(',')].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', 'bulk_upload_sample.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleCsvUpload = async (e) => {
+    e.preventDefault();
+    if (!csvVendorId || !csvFile) return showToast('Select a vendor and file first', 'warning');
+    setCsvUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', csvFile);
+      formData.append('vendorId', csvVendorId);
+      const res = await api.post('/admin/packages/upload-csv', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      const data = res.data;
+      
+      if (data.failedCount > 0) {
+        if (data.importedCount > 0) {
+          showToast(`Imported ${data.importedCount} packages. ${data.failedCount} failed.`, 'warning');
+        } else {
+          showToast(`Upload failed. All ${data.failedCount} rows had errors.`, 'error');
+        }
+      } else {
+        showToast(data.message || 'CSV uploaded!', 'success');
+      }
+      
+      setCsvModal(false);
+      setCsvFile(null);
+      setCsvVendorId('');
+      fetchAll();
+    } catch (err) { showToast(err.message || 'CSV upload failed', 'error'); }
+    finally { setCsvUploading(false); }
+  };
+
+  const handleExportDailyExcel = async () => {
+    try {
+      showToast('Generating 2-Sheet Excel export...', 'info');
+      const response = await api.get('/admin/export/daily-excel', {
+        responseType: 'blob'
+      });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      const fileName = `ktmexpress_daily_export_${new Date().toISOString().split('T')[0]}.xlsx`;
+      link.setAttribute('download', fileName);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      showToast('Daily Excel file downloaded successfully!', 'success');
+    } catch (err) {
+      showToast('Failed to export Excel file: ' + (err.message || 'Error'), 'error');
+    }
+  };
+
   const handleScanSuccess = async (trackingCode) => {
     try {
       const res = await api.patch(`/packages/${trackingCode}/warehouse-arrival`);
@@ -162,6 +244,7 @@ const DispatcherHome = () => {
 
   useEffect(() => {
     fetchAll();
+    fetchVendors();
     const interval = setInterval(fetchAll, 30000);
     return () => clearInterval(interval);
   }, [fetchAll]);
@@ -191,7 +274,19 @@ const DispatcherHome = () => {
         if (statusFilter === 'verification_pending') {
           if (p.deliveryVerificationStatus !== 'Pending') return false;
         } else if (statusFilter === 'Postponed') {
-          if (p.status !== 'Postponed' && p.riderId) return false;
+          if (p.status !== 'Postponed') return false;
+        } else if (statusFilter === 'Warehouse' || statusFilter === 'In Warehouse') {
+          if (p.status !== 'In Warehouse' && p.status !== 'Warehouse' && p.status !== 'Sorted') return false;
+        } else if (statusFilter === 'Out of Delivery' || statusFilter === 'Out for Delivery') {
+          if (p.status !== 'Out for Delivery' && p.status !== 'Out of Delivery') return false;
+        } else if (statusFilter === 'Arrive' || statusFilter === 'Arrived') {
+          if (p.status !== 'Arrive' && p.status !== 'Arrived') return false;
+        } else if (statusFilter === 'Exchange' || statusFilter === 'Exchanged') {
+          if (p.status !== 'Exchange' && p.status !== 'Exchanged') return false;
+        } else if (statusFilter === 'Returned' || statusFilter === 'Returned to Vendor') {
+          if (p.status !== 'Returned' && p.status !== 'Returned to Vendor') return false;
+        } else if (statusFilter === 'Pick Up Requested' || statusFilter === 'Pickups') {
+          if (!['Pending', 'Pick Up Requested', 'Picked Up'].includes(p.status)) return false;
         } else if (p.status !== statusFilter) {
           return false;
         }
@@ -199,7 +294,7 @@ const DispatcherHome = () => {
 
       // 3. Rider Filter
       if (riderFilter !== 'all') {
-        if (riderFilter === 'postponed' || riderFilter === 'unassigned') {
+        if (riderFilter === 'unassigned') {
           if (p.riderId) return false;
         } else {
           const rId = p.riderId?._id || p.riderId;
@@ -254,6 +349,16 @@ const DispatcherHome = () => {
     }
   };
 
+  const handleQuickStatus = async (pkgId, newStatus) => {
+    try {
+      await api.put(`/dispatcher/packages/${pkgId}/status`, { status: newStatus });
+      showToast(`✓ Status updated to "${newStatus}"`, 'success');
+      fetchAll();
+    } catch (e) {
+      showToast(e.response?.data?.message || e.message || 'Failed to update status', 'error');
+    }
+  };
+
   const hasActiveFilters = search.trim() !== '' || statusFilter !== 'all' || riderFilter !== 'all' || dateFilter !== 'all';
   const clearFilters = () => {
     setSearch('');
@@ -268,22 +373,54 @@ const DispatcherHome = () => {
 
   // Status counts
   const countVerificationPending = packages.filter(p => p.deliveryVerificationStatus === 'Pending').length;
-  const countInWarehouse = packages.filter(p => p.status === 'In Warehouse').length;
-  const countOutForDelivery = packages.filter(p => p.status === 'Out for Delivery').length;
+  const countInWarehouse = packages.filter(p => p.status === 'In Warehouse' || p.status === 'Warehouse' || p.status === 'Sorted').length;
+  const countOutForDelivery = packages.filter(p => p.status === 'Out for Delivery' || p.status === 'Out of Delivery').length;
   const countDelivered = packages.filter(p => p.status === 'Delivered').length;
-  const countPostponed = packages.filter(p => p.status === 'Postponed' || (!p.riderId && p.status === 'In Warehouse')).length;
+  const countPostponed = packages.filter(p => p.status === 'Postponed').length;
   const countPickups = packages.filter(p => ['Pending', 'Pick Up Requested', 'Picked Up'].includes(p.status)).length;
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
         <div>
           <h2 style={{ fontSize: 20, fontWeight: 700, color: '#111827', margin: 0 }}>Warehouse Dispatch Overview</h2>
           <p style={{ margin: '2px 0 0', fontSize: 13, color: '#6b7280' }}>Manage deliveries, search tracking codes & monitor active riders</p>
         </div>
-        <ActionBtn onClick={() => setScannerOpen(true)} variant="primary" icon={<span style={{fontSize:16}}>📷</span>}>
-          Scan Arrival
-        </ActionBtn>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button 
+            type="button"
+            className="btn-primary py-2 px-3.5 text-xs font-bold flex items-center gap-1.5 shadow-sm rounded-xl" 
+            onClick={() => setCreateModal(true)}
+          >
+            <Plus className="w-4 h-4" /> Create Order
+          </button>
+          <button 
+            type="button"
+            className="btn-outline py-2 px-3.5 text-xs font-bold flex items-center gap-1.5 text-slate-800 border-slate-300 hover:bg-slate-50 shadow-sm rounded-xl bg-white" 
+            onClick={() => { fetchVendors(); setPrintLabelsModalOpen(true); }}
+            title="Print 4x6 Delivery Labels"
+          >
+            <Printer className="w-4 h-4 text-slate-700" /> Print Labels
+          </button>
+          <button 
+            type="button"
+            className="btn-outline py-2 px-3.5 text-xs font-bold flex items-center gap-1.5 text-emerald-700 border-emerald-300 hover:bg-emerald-50 shadow-sm rounded-xl bg-white" 
+            onClick={() => setCsvModal(true)}
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-600" /> CSV Upload
+          </button>
+          <button 
+            type="button"
+            className="btn-outline py-2 px-3.5 text-xs font-bold flex items-center gap-1.5 text-emerald-700 border-emerald-300 hover:bg-emerald-50 shadow-sm rounded-xl bg-white" 
+            onClick={handleExportDailyExcel} 
+            title="Export 2-Sheet Daily Excel Report"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-600" /> Daily Excel
+          </button>
+          <ActionBtn onClick={() => setScannerOpen(true)} variant="primary" icon={<span style={{fontSize:16}}>📷</span>}>
+            Scan Arrival
+          </ActionBtn>
+        </div>
       </div>
 
       {scannerOpen && (
@@ -298,9 +435,10 @@ const DispatcherHome = () => {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 16, marginBottom: 24 }}>
         {[
           { label: 'Pickups', value: s.pickupsPending || 0, color: '#f59e0b', icon: '🚚', path: '/dispatcher/tasks' },
-          { label: 'In Warehouse', value: s.inWarehouse || 0, color: '#8b5cf6', icon: '🏭', path: '/dispatcher/inbound-scan' },
-          { label: 'Postponed', value: s.unassigned || 0, color: '#ef4444', icon: '⚠️', path: '/dispatcher/tasks' },
-          { label: 'Out for Delivery', value: s.outForDelivery || 0, color: '#06b6d4', icon: '📦', path: '/dispatcher/tasks' },
+          { label: 'Arrived', value: s.inWarehouse || 0, color: '#8b5cf6', icon: '🏬', path: '/dispatcher/inbound-scan' },
+          { label: 'Unassigned', value: s.unassigned || 0, color: '#64748b', icon: '📋', path: '/dispatcher/tasks' },
+          { label: 'Dispatched', value: s.outForDelivery || 0, color: '#06b6d4', icon: '🚀', path: '/dispatcher/tasks' },
+          { label: 'Postponed', value: s.postponed || 0, color: '#ef4444', icon: '⚠️', path: '/dispatcher/tasks' },
           { label: 'Returns Pending', value: s.returnedPending || 0, color: '#6b7280', icon: '↩️', path: '/dispatcher/reverse-logistics' },
           { label: 'Active Riders', value: s.activeRiders || 0, color: '#10b981', icon: '🏍️', path: '/dispatcher/riders' },
         ].map(item => (
@@ -387,15 +525,15 @@ const DispatcherHome = () => {
                 }}
               >
                 <option value="all">All Statuses ({packages.length})</option>
-                <option value="In Warehouse">🏬 In Warehouse ({countInWarehouse})</option>
-                <option value="Out for Delivery">🚀 Out for Delivery ({countOutForDelivery})</option>
-                <option value="Delivered">✅ Delivered ({countDelivered})</option>
-                <option value="Postponed">⚠️ Postponed ({countPostponed})</option>
-                <option value="Pick Up Requested">🚚 Pick Up Requested</option>
-                <option value="Picked Up">📦 Picked Up</option>
-                <option value="Cancelled">❌ Cancelled</option>
-                <option value="Returned">↩️ Returned</option>
-                <option value="Returned to Vendor">🔄 Returned to Vendor</option>
+                <option value="Out of Delivery">Out of Delivery ({countOutForDelivery})</option>
+                <option value="Arrive">Arrive</option>
+                <option value="Warehouse">Warehouse ({countInWarehouse})</option>
+                <option value="Delivered">Delivered ({countDelivered})</option>
+                <option value="Pending">Pending</option>
+                <option value="Picked Up">Picked Up</option>
+                <option value="Postponed">Postponed ({countPostponed})</option>
+                <option value="Returned">Returned</option>
+                <option value="Exchange">Exchange</option>
               </select>
             </div>
 
@@ -417,7 +555,7 @@ const DispatcherHome = () => {
                 }}
               >
                 <option value="all">All Riders</option>
-                <option value="postponed">⚠️ Postponed (No Rider)</option>
+                <option value="unassigned">📋 Unassigned (No Rider)</option>
                 {riders.map(r => (
                   <option key={r._id} value={r._id}>🏍️ {r.name}</option>
                 ))}
@@ -456,8 +594,8 @@ const DispatcherHome = () => {
             {[
               { id: 'all', label: 'All', count: packages.length, color: '#3b82f6' },
               { id: 'verification_pending', label: '⏳ Verification Pending', count: countVerificationPending, color: '#d97706' },
-              { id: 'In Warehouse', label: 'In Warehouse', count: countInWarehouse, color: '#8b5cf6' },
-              { id: 'Out for Delivery', label: 'Out for Delivery', count: countOutForDelivery, color: '#0284c7' },
+              { id: 'In Warehouse', label: 'Arrived', count: countInWarehouse, color: '#8b5cf6' },
+              { id: 'Out for Delivery', label: 'Dispatched', count: countOutForDelivery, color: '#0284c7' },
               { id: 'Delivered', label: 'Delivered', count: countDelivered, color: '#10b981' },
               { id: 'Postponed', label: 'Postponed', count: countPostponed, color: '#ef4444' },
               { id: 'Pick Up Requested', label: 'Pickups', count: countPickups, color: '#f59e0b' },
@@ -520,7 +658,7 @@ const DispatcherHome = () => {
                     />
                   </td>
                 </tr>
-              ) : filteredPackages.slice(0, 100).map(p => (
+              ) : filteredPackages.slice(0, 500).map(p => (
                 <tr key={p._id} style={{ transition: 'background 0.1s' }} onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'} onMouseLeave={e => e.currentTarget.style.background = ''}>
                   <td style={tdStyle}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -548,8 +686,8 @@ const DispatcherHome = () => {
                         🏍️ {p.riderId.name}
                       </span>
                     ) : (
-                      <span style={{ color: '#ea580c', background: '#fff7ed', border: '1px solid #ffedd5', padding: '2px 8px', borderRadius: 6, fontSize: 11, fontWeight: 600 }}>
-                        Postponed
+                      <span style={{ color: '#64748b', background: '#f1f5f9', border: '1px solid #e2e8f0', padding: '2px 8px', borderRadius: 6, fontSize: 11, fontWeight: 600 }}>
+                        Unassigned
                       </span>
                     )}
                   </td>
@@ -577,45 +715,71 @@ const DispatcherHome = () => {
                   <td style={{ ...tdStyle, fontWeight: 700, color: '#0f172a', textAlign: 'right' }}>Rs. {p.amount?.toLocaleString()}</td>
                   <td style={{ ...tdStyle, textAlign: 'right' }}>
                     <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'center' }}>
+                      {/* Verification Status Action */}
                       {p.deliveryVerificationStatus === 'Pending' ? (
                         <button
                           onClick={() => handleAcceptVerify(p)}
-                          style={{
-                            background: '#059669',
-                            color: '#fff',
-                            border: 'none',
-                            borderRadius: 6,
-                            padding: '4px 10px',
-                            fontSize: 11,
-                            fontWeight: 700,
-                            cursor: 'pointer',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: 4,
-                            boxShadow: '0 1px 2px rgba(0,0,0,0.08)'
-                          }}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors cursor-pointer"
                           title="Accept Rider Changes & Verify"
                         >
-                          <CheckCircle2 style={{ width: 12, height: 12 }} /> Accept
+                          <CheckCircle2 className="w-3.5 h-3.5" /> Accept
                         </button>
                       ) : ['Delivered', 'Cancelled', 'Returned', 'Exchanged'].includes(p.status) && p.deliveryVerificationStatus !== 'Verified' ? (
                         <button
                           onClick={() => handleAcceptVerify(p)}
-                          style={{
-                            background: '#f1f5f9',
-                            color: '#334155',
-                            border: '1px solid #cbd5e1',
-                            borderRadius: 6,
-                            padding: '3px 8px',
-                            fontSize: 11,
-                            fontWeight: 600,
-                            cursor: 'pointer'
-                          }}
+                          className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
                           title="Verify Status"
                         >
                           Verify
                         </button>
                       ) : null}
+
+                      {/* Contextual Quick Action Button */}
+                      {(p.status === 'In Warehouse' || p.status === 'Arrived') ? (
+                        <button
+                          onClick={() => handleQuickStatus(p._id, 'Out for Delivery')}
+                          className="px-2.5 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 text-xs font-bold rounded-lg transition-colors cursor-pointer shadow-sm"
+                          title="Dispatch for Delivery"
+                        >
+                          Dispatch
+                        </button>
+                      ) : (p.status === 'Dispatched' || p.status === 'Out for Delivery') ? (
+                        <button
+                          onClick={() => handleQuickStatus(p._id, 'Delivered')}
+                          className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-bold rounded-lg transition-colors cursor-pointer shadow-sm"
+                          title="Mark Delivered"
+                        >
+                          Mark Delivered
+                        </button>
+                      ) : (p.status === 'Picked Up' || p.status === 'Pick Up Requested') ? (
+                        <button
+                          onClick={() => handleQuickStatus(p._id, 'In Warehouse')}
+                          className="px-2.5 py-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 text-xs font-bold rounded-lg transition-colors cursor-pointer shadow-sm"
+                          title="Receive in Warehouse"
+                        >
+                          Receive
+                        </button>
+                      ) : null}
+
+                      {/* Professional Status Dropdown */}
+                      <select
+                        value={p.status}
+                        onChange={e => handleQuickStatus(p._id, e.target.value)}
+                        className="text-xs font-semibold text-slate-700 bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 hover:border-slate-300 focus:outline-none focus:ring-1 focus:ring-slate-400 shadow-sm cursor-pointer"
+                        title="Update package status"
+                      >
+                        <option value="Pending">Pending</option>
+                        <option value="Pick Up Requested">Pick Up Requested</option>
+                        <option value="Picked Up">Picked Up</option>
+                        <option value="In Warehouse">In Warehouse</option>
+                        <option value="Arrived">Arrived</option>
+                        <option value="Out for Delivery">Out for Delivery</option>
+                        <option value="Dispatched">Dispatched</option>
+                        <option value="Delivered">Delivered</option>
+                        <option value="Postponed">Postponed</option>
+                        <option value="Cancelled">Cancelled</option>
+                        <option value="Returned">Returned to Vendor</option>
+                      </select>
                     </div>
                   </td>
                 </tr>
@@ -624,6 +788,130 @@ const DispatcherHome = () => {
           </table>
         </div>
       </div>
+
+      {/* Create Order Modal */}
+      {createModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm animate-fadeIn" onClick={() => setCreateModal(false)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden animate-scaleIn" onClick={e => e.stopPropagation()}>
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+              <h3 className="font-bold text-slate-900 text-lg flex items-center gap-2">
+                <Plus className="w-5 h-5 text-brand-600" /> Create Single Order
+              </h3>
+              <button onClick={() => setCreateModal(false)} className="text-slate-400 hover:text-slate-600 transition-colors">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-6">
+              <form onSubmit={handleCreate} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-1">Select Vendor <span className="text-red-500">*</span></label>
+                  <select className="input-field" required value={newPkg.vendorId} onChange={e => setNewPkg(f => ({ ...f, vendorId: e.target.value }))}>
+                    <option value="">— Choose Vendor —</option>
+                    {vendors.map(v => <option key={v._id} value={v._id}>{v.name} — {v.vendorMeta?.shopName || v.email}</option>)}
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1">Customer Name <span className="text-red-500">*</span></label>
+                    <input type="text" className="input-field" required value={newPkg.customerName} onChange={e => setNewPkg(f => ({ ...f, customerName: e.target.value }))} />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1">Address <span className="text-red-500">*</span></label>
+                    <input type="text" className="input-field" required value={newPkg.address} onChange={e => setNewPkg(f => ({ ...f, address: e.target.value }))} />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1">Customer Phone <span className="text-red-500">*</span></label>
+                    <input type="text" className="input-field" required value={newPkg.customerPhone} onChange={e => setNewPkg(f => ({ ...f, customerPhone: e.target.value }))} />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1">City</label>
+                    <input type="text" className="input-field" value={newPkg.city} onChange={e => setNewPkg(f => ({ ...f, city: e.target.value }))} />
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 border-t border-slate-100 pt-5">
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1">Amount (COD) <span className="text-red-500">*</span></label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-medium text-sm">Rs.</span>
+                      <input type="number" className="input-field pl-9" required value={newPkg.amount} onChange={e => setNewPkg(f => ({ ...f, amount: e.target.value }))} />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1">Weight (KG)</label>
+                    <input type="number" className="input-field" step="0.1" value={newPkg.weight} onChange={e => setNewPkg(f => ({ ...f, weight: e.target.value }))} />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1">Delivery Date</label>
+                    <input type="date" className="input-field" value={newPkg.deliveryDate} onChange={e => setNewPkg(f => ({ ...f, deliveryDate: e.target.value }))} />
+                  </div>
+                </div>
+                <div className="pt-4 flex justify-end gap-3 border-t border-slate-100 mt-6">
+                  <button type="button" onClick={() => setCreateModal(false)} className="btn-secondary">Cancel</button>
+                  <button type="submit" className="btn-primary">Create Order</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CSV Upload Modal */}
+      {csvModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm animate-fadeIn" onClick={() => setCsvModal(false)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden animate-scaleIn" onClick={e => e.stopPropagation()}>
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+              <h3 className="font-bold text-slate-900 text-lg flex items-center gap-2">
+                <FileSpreadsheet className="w-5 h-5 text-emerald-600" /> Bulk CSV Upload
+              </h3>
+              <button onClick={() => setCsvModal(false)} className="text-slate-400 hover:text-slate-600 transition-colors">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-6">
+              <form onSubmit={handleCsvUpload} className="space-y-5">
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-1">Select Vendor <span className="text-red-500">*</span></label>
+                  <select className="input-field" required value={csvVendorId} onChange={e => setCsvVendorId(e.target.value)}>
+                    <option value="">— Choose Vendor —</option>
+                    {vendors.map(v => <option key={v._id} value={v._id}>{v.name} — {v.vendorMeta?.shopName || v.email}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-1">Upload CSV File <span className="text-red-500">*</span></label>
+                  <input type="file" className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-brand-50 file:text-brand-700 hover:file:bg-brand-100 transition-all border border-slate-200 rounded-xl p-2 cursor-pointer" accept=".csv" required onChange={e => setCsvFile(e.target.files[0])} />
+                  <div className="mt-4 p-4 bg-amber-50 border border-amber-200 rounded-xl">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs font-bold text-amber-800 uppercase tracking-wider flex items-center gap-1.5"><AlertTriangle className="w-4 h-4" /> Standard Columns</p>
+                      <button type="button" onClick={downloadSampleCsv} className="text-xs text-amber-800 hover:text-amber-950 font-semibold underline flex items-center gap-1">
+                        <Download className="w-3.5 h-3.5" /> Sample CSV
+                      </button>
+                    </div>
+                    <p className="text-xs font-mono text-amber-700 leading-relaxed bg-white/50 p-2 rounded-lg border border-amber-100">
+                      customer name, address, customerPhone, city, amount, weight, delivery charge, out of valley
+                    </p>
+                  </div>
+                </div>
+                <div className="pt-4 flex justify-end gap-3 border-t border-slate-100 mt-6">
+                  <button type="button" onClick={() => setCsvModal(false)} className="btn-secondary">Cancel</button>
+                  <button type="submit" className="btn-primary flex items-center gap-2" disabled={csvUploading}>
+                    {csvUploading ? 'Uploading...' : 'Upload & Import'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Print Delivery Labels Modal */}
+      <PrintLabelsModal
+        isOpen={printLabelsModalOpen}
+        onClose={() => setPrintLabelsModalOpen(false)}
+        packages={packages}
+        vendors={vendors}
+        riders={riders}
+        onRefresh={fetchAll}
+      />
     </div>
   );
 };
@@ -1124,7 +1412,7 @@ const InboundScan = () => {
   };
 
   const bulkSendForDelivery = async () => {
-    const toSend = selected.filter(id => ['In Warehouse', 'Sorted', 'Postponed'].includes(packages.find(p => p._id === id)?.status));
+    const toSend = selected.filter(id => ['In Warehouse', 'Warehouse', 'Sorted', 'Postponed', 'Arrived', 'Dispatched'].includes(packages.find(p => p._id === id)?.status));
     if (!toSend.length) return showToast('No eligible packages selected', 'warning');
     if (!riderId) return showToast('Select a rider first', 'warning');
     setBulkAssigning(true);
@@ -1139,8 +1427,8 @@ const InboundScan = () => {
   };
 
   const selectedPackages = filtered.filter(p => selected.includes(p._id));
-  const hasUnconfirmed = selectedPackages.some(p => p.status !== 'In Warehouse');
-  const hasInWarehouse = selectedPackages.some(p => p.status === 'In Warehouse');
+  const hasUnconfirmed = selectedPackages.some(p => p.status !== 'In Warehouse' && p.status !== 'Warehouse');
+  const hasInWarehouse = selectedPackages.some(p => p.status === 'In Warehouse' || p.status === 'Warehouse');
 
   return (
     <div>
@@ -1168,23 +1456,33 @@ const InboundScan = () => {
       </div>
 
       {selected.length > 0 && (
-        <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '10px 16px', marginBottom: 16, display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center', justifyContent: 'space-between' }}>
-          <span style={{ fontSize: 13, fontWeight: 600, color: '#1d4ed8' }}>
+        <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 12, padding: '12px 18px', marginBottom: 16, display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center', justifyContent: 'space-between', color: '#fff' }}>
+          <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: '#f1f5f9' }}>
             {selected.length} package(s) selected
           </span>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <ActionBtn onClick={() => bulkSetStatus('In Warehouse')} disabled={bulkStatusLoading} variant="warning" size="sm">
-              🏬 Return to Warehouse
-            </ActionBtn>
-            <ActionBtn onClick={() => bulkSetStatus('Out for Delivery')} disabled={bulkStatusLoading} variant="primary" size="sm">
-              🚀 Dispatched
-            </ActionBtn>
-            <ActionBtn onClick={() => bulkSetStatus('Delivered')} disabled={bulkStatusLoading} variant="success" size="sm">
-              ✅ Delivered
-            </ActionBtn>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: '#94a3b8' }}>Quick Action:</span>
+              <select
+                disabled={bulkStatusLoading}
+                defaultValue=""
+                onChange={(e) => {
+                  if (e.target.value) {
+                    bulkSetStatus(e.target.value);
+                    e.target.value = "";
+                  }
+                }}
+                style={{ background: '#1e293b', color: '#fff', fontSize: 12, fontWeight: 700, padding: '6px 12px', borderRadius: 8, border: '1px solid #334155', cursor: 'pointer', outline: 'none' }}
+              >
+                <option value="" disabled>{bulkStatusLoading ? 'Updating...' : 'Change Status...'}</option>
+                {ALLOWED_STATUSES.map(st => (
+                  <option key={st} value={st}>{st}</option>
+                ))}
+              </select>
+            </div>
             {hasUnconfirmed && (
               <ActionBtn onClick={bulkConfirmArrival} disabled={bulkConfirming} variant="ghost" size="sm">
-                {bulkConfirming ? '...' : '✓ Confirm Arrival'}
+                {bulkConfirming ? '...' : 'Confirm Arrival'}
               </ActionBtn>
             )}
             {hasInWarehouse && (
@@ -1192,7 +1490,7 @@ const InboundScan = () => {
                 <select
                   value={riderId}
                   onChange={e => setRiderId(e.target.value)}
-                  style={{ border: '1px solid #bfdbfe', borderRadius: 6, padding: '6px 10px', fontSize: 12, outline: 'none' }}
+                  style={{ background: '#1e293b', color: '#fff', border: '1px solid #334155', borderRadius: 8, padding: '6px 10px', fontSize: 12, outline: 'none' }}
                 >
                   <option value="">— Select Rider —</option>
                   {riders.map(r => <option key={r._id} value={r._id}>{r.name}</option>)}
@@ -1202,7 +1500,7 @@ const InboundScan = () => {
                 </ActionBtn>
               </>
             )}
-            <button onClick={() => setSelected([])} style={{ fontSize: 12, color: '#6b7280', background: 'none', border: 'none', cursor: 'pointer', marginLeft: 4 }}>Clear</button>
+            <button onClick={() => setSelected([])} style={{ fontSize: 12, color: '#94a3b8', background: 'none', border: 'none', cursor: 'pointer', marginLeft: 4 }}>Deselect</button>
           </div>
         </div>
       )}
@@ -1241,14 +1539,14 @@ const InboundScan = () => {
                     <td style={{ ...tdStyle, fontWeight: 600 }}>Rs. {p.amount?.toLocaleString()}</td>
                     <td style={tdStyle}><StatusBadge status={p.status} /></td>
                     <td style={tdStyle} onClick={e => e.stopPropagation()}>
-                      {p.status !== 'In Warehouse' ? (
+                      {p.status !== 'In Warehouse' && p.status !== 'Warehouse' ? (
                         <ActionBtn onClick={() => confirmArrival(p._id)} disabled={actionLoading[p._id]} variant="primary" size="sm">
                           {actionLoading[p._id] ? '...' : '✓ Confirm Arrival'}
                         </ActionBtn>
                       ) : (
                         <span style={{ color: '#10b981', fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
                           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
-                          In Warehouse
+                          Warehouse
                         </span>
                       )}
                     </td>
@@ -1290,11 +1588,21 @@ const Routing = () => {
     }
   };
 
+  const handleSingleStatus = async (pkgId, newStatus) => {
+    try {
+      await api.put(`/dispatcher/packages/${pkgId}/status`, { status: newStatus });
+      showToast(`✓ Status updated to "${newStatus}"!`, 'success');
+      fetchData(true);
+    } catch (e) {
+      showToast(e.response?.data?.message || e.message || 'Failed to update status', 'error');
+    }
+  };
+
   const fetchData = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
       const [pRes, rRes] = await Promise.all([
-        api.get('/dispatcher/packages?status=In Warehouse,Out for Delivery,Postponed'),
+        api.get('/dispatcher/packages?status=all'),
         api.get('/dispatcher/riders'),
       ]);
       setPackages(pRes.data.data || []);
@@ -1372,15 +1680,18 @@ const Routing = () => {
             {selected.length} package(s) selected
             {selectedRider ? ` → Assigning to ${selectedRider.name}` : ''}
           </span>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <ActionBtn onClick={() => bulkSetStatus('In Warehouse')} disabled={bulkStatusLoading} variant="warning" size="sm">
-              🏬 Return to Warehouse
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <ActionBtn onClick={() => bulkSetStatus('Dispatched')} disabled={bulkStatusLoading} variant="primary" size="sm">
+              Dispatch
             </ActionBtn>
             <ActionBtn onClick={() => bulkSetStatus('Out for Delivery')} disabled={bulkStatusLoading} variant="primary" size="sm">
-              🚀 Dispatched
+              Out for Delivery
+            </ActionBtn>
+            <ActionBtn onClick={() => bulkSetStatus('In Warehouse')} disabled={bulkStatusLoading} variant="secondary" size="sm">
+              Receive in Warehouse
             </ActionBtn>
             <ActionBtn onClick={() => bulkSetStatus('Delivered')} disabled={bulkStatusLoading} variant="success" size="sm">
-              ✅ Delivered
+              Mark Delivered
             </ActionBtn>
             <button onClick={() => setSelected([])} style={{ fontSize: 12, color: '#6b7280', background: 'none', border: 'none', cursor: 'pointer', marginLeft: 4 }}>Clear</button>
           </div>
@@ -1395,12 +1706,12 @@ const Routing = () => {
                 <th style={{ ...thStyle, width: 44 }}>
                   <input type="checkbox" onChange={handleSelectAll} checked={filtered.length > 0 && selected.length === filtered.length} />
                 </th>
-                {['Tracking', 'Vendor', 'Customer', 'Destination', 'Weight', 'COD (Rs.)', 'Status', 'Current Rider'].map(h => <th key={h} style={thStyle}>{h}</th>)}
+                {['Tracking', 'Vendor', 'Customer', 'Destination', 'Weight', 'COD (Rs.)', 'Status', 'Current Rider', 'Quick Actions'].map(h => <th key={h} style={thStyle}>{h}</th>)}
               </tr>
             </thead>
             <tbody>
-              {loading ? <tr><td colSpan="9"><Spinner /></td></tr>
-                : filtered.length === 0 ? <tr><td colSpan="9"><EmptyState message="No packages found." icon="📦" /></td></tr>
+              {loading ? <tr><td colSpan="10"><Spinner /></td></tr>
+                : filtered.length === 0 ? <tr><td colSpan="10"><EmptyState message="No packages found." icon="📦" /></td></tr>
                 : filtered.map(p => (
                   <tr key={p._id} style={{ cursor: 'pointer' }} onClick={() => handleSelect(p._id)} onMouseEnter={e => e.currentTarget.style.background = '#f9fafb'} onMouseLeave={e => e.currentTarget.style.background = selected.includes(p._id) ? '#eff6ff' : ''}>
                     <td style={tdStyle} onClick={e => e.stopPropagation()}>
@@ -1414,6 +1725,56 @@ const Routing = () => {
                     <td style={{ ...tdStyle, fontWeight: 600 }}>{p.amount?.toLocaleString()}</td>
                     <td style={tdStyle}><StatusBadge status={p.status} /></td>
                     <td style={tdStyle}>{p.riderId?.name || <span style={{ color: '#d1d5db', fontStyle: 'italic', fontSize: 12 }}>None</span>}</td>
+                    <td style={tdStyle} onClick={e => e.stopPropagation()}>
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        {/* Contextual Quick Button */}
+                        {(p.status === 'In Warehouse' || p.status === 'Arrived') ? (
+                          <button
+                            onClick={() => handleSingleStatus(p._id, 'Out for Delivery')}
+                            className="px-2.5 py-1 bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 text-xs font-bold rounded-lg transition-colors cursor-pointer shadow-sm"
+                            title="Dispatch for Delivery"
+                          >
+                            Dispatch
+                          </button>
+                        ) : (p.status === 'Dispatched' || p.status === 'Out for Delivery') ? (
+                          <button
+                            onClick={() => handleSingleStatus(p._id, 'Delivered')}
+                            className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-bold rounded-lg transition-colors cursor-pointer shadow-sm"
+                            title="Mark Delivered"
+                          >
+                            Delivered
+                          </button>
+                        ) : (p.status === 'Picked Up' || p.status === 'Pick Up Requested') ? (
+                          <button
+                            onClick={() => handleSingleStatus(p._id, 'In Warehouse')}
+                            className="px-2.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 text-xs font-bold rounded-lg transition-colors cursor-pointer shadow-sm"
+                            title="Receive in Warehouse"
+                          >
+                            Receive
+                          </button>
+                        ) : null}
+
+                        {/* Professional Status Select Dropdown */}
+                        <select
+                          value={p.status}
+                          onChange={e => handleSingleStatus(p._id, e.target.value)}
+                          className="text-xs font-semibold text-slate-700 bg-white border border-slate-200 rounded-lg px-2.5 py-1 hover:border-slate-300 focus:outline-none focus:ring-1 focus:ring-slate-400 shadow-sm cursor-pointer"
+                          title="Change package status"
+                        >
+                          <option value="Pending">Pending</option>
+                          <option value="Pick Up Requested">Pick Up Requested</option>
+                          <option value="Picked Up">Picked Up</option>
+                          <option value="In Warehouse">In Warehouse</option>
+                          <option value="Arrived">Arrived</option>
+                          <option value="Out for Delivery">Out for Delivery</option>
+                          <option value="Dispatched">Dispatched</option>
+                          <option value="Delivered">Delivered</option>
+                          <option value="Postponed">Postponed</option>
+                          <option value="Cancelled">Cancelled</option>
+                          <option value="Returned">Returned to Vendor</option>
+                        </select>
+                      </div>
+                    </td>
                   </tr>
                 ))}
             </tbody>
@@ -1514,7 +1875,7 @@ const ReverseLogistics = () => {
   // Group pendingRider by Rider
   const filteredPendingRider = applySearch(pendingRider);
   const riderGroups = filteredPendingRider.reduce((acc, p) => {
-    const riderName = p.riderId?.name || 'Unassigned / Postponed';
+    const riderName = p.riderId?.name || 'Unassigned';
     const riderId = p.riderId?._id || 'unassigned';
     if (!acc[riderName]) acc[riderName] = { riderId, riderName, packages: [] };
     acc[riderName].packages.push(p);
@@ -2619,19 +2980,32 @@ const CodHandovers = () => {
     let gross = 0;
     let expenses = 0;
     let net = 0;
+    let cash = 0;
+    let online = 0;
     let pending = 0;
 
     handovers.forEach(h => {
+      // Exclude Rejected handovers from financial totals
+      if (h.status === 'Rejected') return;
+
       const hGross = h.grossCOD || ((h.amount || 0) + (h.expenseDeduction || 0));
       const hExp = h.expenseDeduction || 0;
       const hNet = h.amount || 0;
-      gross += hGross;
-      expenses += hExp;
-      net += hNet;
-      if (h.status === 'Pending Verification') pending += hNet;
+      const hCash = h.cashAmount !== undefined ? h.cashAmount : (h.onlineAmount ? Math.max(0, hNet - h.onlineAmount) : hNet);
+      const hOnline = h.onlineAmount || 0;
+
+      if (h.status === 'Verified') {
+        gross += hGross;
+        expenses += hExp;
+        net += hNet;
+        cash += hCash;
+        online += hOnline;
+      } else if (h.status === 'Pending Verification') {
+        pending += hNet;
+      }
     });
 
-    return { gross, expenses, net, pending };
+    return { gross, expenses, net, cash, online, pending };
   }, [handovers]);
 
   const filteredHandovers = useMemo(() => {
@@ -2640,7 +3014,8 @@ const CodHandovers = () => {
         const s = search.toLowerCase().trim();
         const riderName = (h.riderId?.name || '').toLowerCase();
         const riderPhone = (h.riderId?.contact || h.riderId?.phone || '').toLowerCase();
-        if (!riderName.includes(s) && !riderPhone.includes(s)) return false;
+        const ref = (h.onlineReference || '').toLowerCase();
+        if (!riderName.includes(s) && !riderPhone.includes(s) && !ref.includes(s)) return false;
       }
       if (statusFilter !== 'all' && h.status !== statusFilter) return false;
       return true;
@@ -2651,15 +3026,27 @@ const CodHandovers = () => {
     let gross = 0;
     let expenses = 0;
     let net = 0;
+    let cash = 0;
+    let online = 0;
     let packages = 0;
     filteredHandovers.forEach(h => {
-      gross += h.grossCOD || ((h.amount || 0) + (h.expenseDeduction || 0));
-      expenses += h.expenseDeduction || 0;
-      net += h.amount || 0;
+      // Exclude Rejected handovers unless explicitly filtering by Rejected
+      if (h.status === 'Rejected' && statusFilter !== 'Rejected') return;
+
+      const hGross = h.grossCOD || ((h.amount || 0) + (h.expenseDeduction || 0));
+      const hExp = h.expenseDeduction || 0;
+      const hNet = h.amount || 0;
+      const hCash = h.cashAmount !== undefined ? h.cashAmount : (h.onlineAmount ? Math.max(0, hNet - h.onlineAmount) : hNet);
+      const hOnline = h.onlineAmount || 0;
+      gross += hGross;
+      expenses += hExp;
+      net += hNet;
+      cash += hCash;
+      online += hOnline;
       packages += h.packageIds?.length || 0;
     });
-    return { gross, expenses, net, packages };
-  }, [filteredHandovers]);
+    return { gross, expenses, net, cash, online, packages };
+  }, [filteredHandovers, statusFilter]);
 
   if (loading) return <Spinner />;
 
@@ -2668,7 +3055,7 @@ const CodHandovers = () => {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
         <div>
           <h2 style={{ fontSize: 20, fontWeight: 700, color: '#111827', margin: 0 }}>COD Reconciliation & Rider Expenses</h2>
-          <p style={{ margin: '2px 0 0', fontSize: 13, color: '#6b7280' }}>Track gross collections, rider expense deductions and verify net cash deposits.</p>
+          <p style={{ margin: '2px 0 0', fontSize: 13, color: '#6b7280' }}>Track gross collections, cash & online payment split, and verify net deposits.</p>
         </div>
         <ActionBtn onClick={() => fetchHandovers()} variant="ghost">↻ Refresh</ActionBtn>
       </div>
@@ -2686,6 +3073,9 @@ const CodHandovers = () => {
         <div style={{ background: '#f0fdf4', borderRadius: 12, border: '1px solid #bbf7d0', padding: '16px 20px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: '#15803d', textTransform: 'uppercase', marginBottom: 4 }}>Total Net Deposited</div>
           <div style={{ fontSize: 22, fontWeight: 800, color: '#166534' }}>Rs. {stats.net.toLocaleString()}</div>
+          <div style={{ fontSize: 11, color: '#15803d', marginTop: 4, fontWeight: 600 }}>
+            💵 Cash: Rs. {stats.cash.toLocaleString()} | 📱 Online: Rs. {stats.online.toLocaleString()}
+          </div>
         </div>
         <div style={{ background: '#faf5ff', borderRadius: 12, border: '1px solid #e9d5ff', padding: '16px 20px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: '#7e22ce', textTransform: 'uppercase', marginBottom: 4 }}>Pending Verification</div>
@@ -2707,7 +3097,7 @@ const CodHandovers = () => {
               type="text"
               value={search}
               onChange={e => setSearch(e.target.value)}
-              placeholder="Search rider name, contact..."
+              placeholder="Search rider, phone, ref..."
               style={{ padding: '7px 12px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, width: 200, outline: 'none' }}
             />
             <select
@@ -2730,21 +3120,25 @@ const CodHandovers = () => {
                 <th style={thStyle}>Date</th>
                 <th style={thStyle}>Rider</th>
                 <th style={{ ...thStyle, textAlign: 'right' }}>Gross COD</th>
-                <th style={{ ...thStyle, textAlign: 'right' }}>Rider Expenses</th>
-                <th style={{ ...thStyle, textAlign: 'right' }}>Net Cash Handover</th>
-                <th style={{ ...thStyle, textAlign: 'center' }}>Packages</th>
+                <th style={{ ...thStyle, textAlign: 'right' }}>Expenses</th>
+                <th style={{ ...thStyle, textAlign: 'right' }}>💵 Cash</th>
+                <th style={{ ...thStyle, textAlign: 'right' }}>📱 Online</th>
+                <th style={{ ...thStyle, textAlign: 'right' }}>Net Total</th>
+                <th style={{ ...thStyle, textAlign: 'center' }}>Pkgs</th>
                 <th style={{ ...thStyle, textAlign: 'center' }}>Status</th>
                 <th style={{ ...thStyle, textAlign: 'right' }}>Action</th>
               </tr>
             </thead>
             <tbody>
               {filteredHandovers.length === 0 ? (
-                <tr><td colSpan="8"><EmptyState message="No matching COD handovers found." /></td></tr>
+                <tr><td colSpan="10"><EmptyState message="No matching COD handovers found." /></td></tr>
               ) : (
                 filteredHandovers.map(h => {
                   const gross = h.grossCOD || ((h.amount || 0) + (h.expenseDeduction || 0));
                   const expense = h.expenseDeduction || 0;
                   const net = h.amount || 0;
+                  const cash = h.cashAmount !== undefined ? h.cashAmount : (h.onlineAmount ? Math.max(0, net - h.onlineAmount) : net);
+                  const online = h.onlineAmount || 0;
 
                   return (
                     <tr key={h._id} style={{ transition: 'background 0.1s' }} onMouseEnter={e => e.currentTarget.style.background = '#f9fafb'} onMouseLeave={e => e.currentTarget.style.background = ''}>
@@ -2766,6 +3160,27 @@ const CodHandovers = () => {
                           </span>
                         ) : (
                           <span style={{ color: '#94a3b8', fontSize: 12 }}>Rs. 0</span>
+                        )}
+                      </td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }}>
+                        <span style={{ fontWeight: 700, color: '#047857', fontSize: 13, background: '#ecfdf5', padding: '3px 8px', borderRadius: 6, display: 'inline-block' }}>
+                          Rs. {cash.toLocaleString()}
+                        </span>
+                      </td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }}>
+                        {online > 0 ? (
+                          <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                            <span style={{ fontWeight: 700, color: '#0369a1', fontSize: 13, background: '#f0f9ff', padding: '3px 8px', borderRadius: 6 }}>
+                              Rs. {online.toLocaleString()}
+                            </span>
+                            {h.onlineReference && (
+                              <span style={{ fontSize: 10, color: '#64748b', marginTop: 2, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={h.onlineReference}>
+                                Ref: {h.onlineReference}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span style={{ color: '#cbd5e1', fontSize: 12 }}>Rs. 0</span>
                         )}
                       </td>
                       <td style={{ ...tdStyle, textAlign: 'right' }}>
@@ -2812,6 +3227,12 @@ const CodHandovers = () => {
                   </td>
                   <td style={{ ...tdStyle, textAlign: 'right', color: '#b45309' }}>
                     - Rs. {filteredTotals.expenses.toLocaleString()}
+                  </td>
+                  <td style={{ ...tdStyle, textAlign: 'right', color: '#047857' }}>
+                    Rs. {filteredTotals.cash.toLocaleString()}
+                  </td>
+                  <td style={{ ...tdStyle, textAlign: 'right', color: '#0369a1' }}>
+                    Rs. {filteredTotals.online.toLocaleString()}
                   </td>
                   <td style={{ ...tdStyle, textAlign: 'right', color: '#15803d', fontSize: 15 }}>
                     Rs. {filteredTotals.net.toLocaleString()}
@@ -2875,6 +3296,43 @@ const DispatcherDashboard = () => {
           });
         });
 
+        // 3. Pending Verifications (excluding Delivered packages)
+        const pendingVerifications = pkgs.filter(p => 
+          p.deliveryVerificationStatus === 'Pending' && 
+          p.status !== 'Delivered' && 
+          p.riderSubmission?.status !== 'Delivered'
+        );
+        pendingVerifications.forEach(p => {
+          notifs.push({
+            id: `verify_${p._id}`,
+            title: 'Verification Pending',
+            message: `Package ${p.trackingCode} (${p.riderSubmission?.status || p.status}) requires verification.`,
+            time: p.riderSubmission?.submittedAt ? new Date(p.riderSubmission.submittedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            read: false,
+            icon: '⏳',
+            path: '/dispatcher'
+          });
+        });
+
+        // 4. Pending Rider Expenses
+        try {
+          const expRes = await api.get('/dispatcher/expenses?limit=50&status=Pending');
+          const pendingExpenses = expRes.data.data || [];
+          pendingExpenses.forEach(e => {
+            notifs.push({
+              id: `exp_${e._id}`,
+              title: 'Rider Expense',
+              message: `${e.riderId?.name || 'A rider'} logged Rs. ${e.amount} for ${e.category}`,
+              time: new Date(e.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              read: false,
+              icon: '🏍️',
+              path: '/dispatcher/expenses'
+            });
+          });
+        } catch (err) {
+          // ignore notification errors
+        }
+
         setNotifications(notifs.slice(0, 15));
       } catch (e) {
         console.error('Failed to fetch notifications:', e.message || e);
@@ -2916,13 +3374,14 @@ const DispatcherDashboard = () => {
       <Suspense fallback={<SectionLoader />}>
         <Routes>
           <Route path="/" element={<DispatcherHome />} />
-          <Route path="/packages" element={<PackageManagement />} />
+          <Route path="/packages" element={<Navigate to="/dispatcher" replace />} />
           <Route path="/tasks" element={<CombinedTasks />} />
           <Route path="/scan-station" element={<ScanStation role="dispatcher" />} />
           <Route path="/inbound-scan" element={<InboundScan />} />
           <Route path="/reverse-logistics" element={<ReverseLogistics />} />
           <Route path="/riders" element={<ActiveRiders />} />
           <Route path="/handovers" element={<CodHandovers />} />
+          <Route path="/expenses" element={<ExpenseLog />} />
         </Routes>
       </Suspense>
     </AppShell>

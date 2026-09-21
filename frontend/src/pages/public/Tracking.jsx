@@ -7,6 +7,7 @@ import PublicFooter from '../../components/PublicFooter';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { StatusBadge } from '../../components/ui/StatusBadge';
+import { TrackingSkeleton } from '../../components/ui/Skeleton';
 
 const Tracking = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -37,30 +38,32 @@ const Tracking = () => {
     <div className="min-h-screen flex flex-col bg-slate-50">
       <PublicNav active="/track" />
 
-      <section className="bg-slate-900 py-16 px-6 text-center shadow-inner relative overflow-hidden">
+      <section className="relative bg-[#002B49] text-white py-10 sm:py-16 px-4 sm:px-6 text-center shadow-inner overflow-hidden">
+        <div className="absolute inset-0 bg-gradient-to-r from-[#002B49] via-[#002035] to-[#001422] opacity-95 pointer-events-none" />
         <div className="max-w-2xl mx-auto relative z-10">
-          <h1 className="text-3xl sm:text-4xl font-bold text-white mb-4 tracking-tight">Track Your Package</h1>
-          <p className="text-slate-400 text-lg mb-8">Enter your 7-character tracking code or Invoice / Order ID</p>
+          <span className="inline-flex items-center gap-1.5 bg-[#E31837] text-white px-3.5 py-1 rounded-full text-xs font-extrabold uppercase tracking-widest mb-3">
+            Live Dispatch Tracking
+          </span>
+          <h1 className="text-2xl sm:text-4xl font-extrabold text-white mb-2 tracking-tight">Track Your Shipment</h1>
+          <p className="text-slate-200 text-xs sm:text-base mb-6 sm:mb-8">Enter your 7-character tracking code or Invoice / Order ID</p>
           
-          <div className="flex bg-white/5 backdrop-blur-md p-1.5 rounded-2xl border border-white/10">
+          <div className="flex bg-white/10 backdrop-blur-md p-1.5 rounded-2xl border border-white/20 shadow-xl">
             <input 
               type="text" 
               value={code} 
               onChange={e => setCode(e.target.value)} 
               onKeyDown={e => e.key === 'Enter' && doTrack()}
-              placeholder="Enter Tracking Code or Invoice ID..."
-              className="flex-1 bg-white border-none outline-none px-5 py-3 rounded-xl text-slate-900 font-mono tracking-wider font-semibold placeholder:text-slate-400 placeholder:font-sans placeholder:font-normal"
+              placeholder="e.g. KTM9823 or INV-1002..."
+              className="flex-1 bg-white border-none outline-none px-3.5 sm:px-5 py-2.5 sm:py-3 rounded-xl text-slate-900 font-mono tracking-wider font-semibold text-sm sm:text-base placeholder:text-slate-400 placeholder:font-sans placeholder:font-normal"
             />
-            <Button 
-              variant="primary"
-              className="ml-2 px-6 rounded-xl h-auto flex items-center gap-2 border-slate-700 bg-slate-800 hover:bg-slate-700"
+            <button 
+              className="ml-2 px-4 sm:px-6 py-2.5 sm:py-3 rounded-xl font-bold flex items-center gap-1.5 sm:gap-2 bg-[#E31837] hover:bg-[#c1122d] text-white transition-colors shadow uppercase text-xs sm:text-sm tracking-wider shrink-0"
               onClick={() => doTrack()} 
               disabled={loading}
-              isLoading={loading}
             >
-              {!loading && <Search className="w-5 h-5" />}
-              <span className="hidden sm:inline">Track</span>
-            </Button>
+              {loading ? <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" /> : <Search className="w-4 h-4 sm:w-5 sm:h-5" />}
+              <span>Track</span>
+            </button>
           </div>
         </div>
       </section>
@@ -68,7 +71,9 @@ const Tracking = () => {
       <main className="flex-1 px-4 sm:px-6 lg:px-8 py-12 -mt-8 relative z-20">
         <div className="max-w-3xl mx-auto">
           
-          {error && (
+          {loading && <TrackingSkeleton />}
+
+          {error && !loading && (
             <div className="bg-white border border-red-200 rounded-xl p-5 mb-8 flex gap-4 shadow-sm">
               <Info className="w-6 h-6 text-red-500 shrink-0" />
               <div>
@@ -78,7 +83,7 @@ const Tracking = () => {
             </div>
           )}
 
-          {pkg && (
+          {pkg && !loading && (
             <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-300">
               {/* Header */}
               <div className="px-6 py-5 border-b border-slate-100 flex justify-between items-center gap-4 flex-wrap bg-slate-50">

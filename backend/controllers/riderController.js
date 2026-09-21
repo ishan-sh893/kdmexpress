@@ -20,17 +20,25 @@ export const getMyDeliveries = async (req, res) => {
     if (status && status !== 'all') {
       filter.status = status;
     } else if (type === 'pickup') {
-      filter.status = { $in: ['Pick Up Requested', 'Picked Up'] };
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      andConditions.push({
+        $or: [
+          { status: 'Pick Up Requested' },
+          { status: 'Picked Up', updatedAt: { $gte: today } }
+        ]
+      });
     } else if (type === 'delivery') {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       andConditions.push({
         $or: [
-          { status: { $in: ['Out for Delivery', 'Postponed'] } },
+          { status: { $in: ['Out for Delivery', 'Out of Delivery', 'Postponed'] } },
           { 
-            status: { $in: ['Delivered', 'Cancelled', 'Returned', 'Exchanged'] },
+            status: { $in: ['Delivered', 'Cancelled', 'Returned', 'Exchanged', 'Exchange'] },
+            cashReconciled: false,
             $or: [
-              { deliveryVerificationStatus: { $in: ['Pending', 'Reopened', 'Verified'] } },
+              { deliveryVerificationStatus: { $in: ['Pending', 'Reopened'] } },
               { updatedAt: { $gte: today } },
               { verifiedAt: { $gte: today } }
             ]
@@ -38,7 +46,7 @@ export const getMyDeliveries = async (req, res) => {
         ]
       });
     } else if (type === 'active_delivery') {
-      filter.status = { $in: ['Out for Delivery', 'Postponed'] };
+      filter.status = { $in: ['Out for Delivery', 'Out of Delivery', 'Postponed'] };
     }
 
     if (search) {
@@ -210,9 +218,9 @@ export const updateDeliveryStatus = async (req, res) => {
 
     await pkg.save();
 
-    // Emit event on Event Bus
-    if (action === 'deliver' || action === 'postpone') {
-      eventBus.emit('package.rider_submitted', { pkg, reqUser: req.user, io: req.io });
+    // Emit event on Event Bus for verification / status alerts
+    if (['deliver', 'postpone', 'cancel', 'return', 'exchange'].includes(action)) {
+      eventBus.emit('package.rider_submitted', { pkg, reqUser: req.user, io: req.io, action, comment });
     }
 
     res.json({ success: true, data: pkg });
@@ -272,13 +280,34 @@ export const getRiderSummary = async (req, res) => {
     }).select('amount').lean();
     const todayExpenses = expensesList.reduce((sum, e) => sum + (e.amount || 0), 0);
 
+    // Check active pending handovers
+    const pendingHandovers = await CodHandover.find({
+      riderId: req.user._id,
+      status: 'Pending Verification'
+    }).lean();
+
+    const pendingPackageIds = new Set(
+      pendingHandovers.flatMap(h => (h.packageIds || []).map(id => id.toString()))
+    );
+
+    const pendingHandoverTotal = pendingHandovers.reduce((sum, h) => sum + (h.amount || 0), 0);
+
+    // Filter unsubmitted packages (delivered, not reconciled, and not already in pending handover)
+    const unsubmittedPackages = await Package.find({
+      riderId,
+      status: 'Delivered',
+      cashReconciled: false,
+      _id: { $nin: Array.from(pendingPackageIds) }
+    }).select('amount').lean();
+
+    const unsubmittedGross = unsubmittedPackages.reduce((sum, p) => sum + (p.amount || 0), 0);
+    const unsubmittedNet = Math.max(0, unsubmittedGross - todayExpenses);
+
     const delivered = result.delivered[0]?.count || 0;
     const pending = result.pending[0]?.count || 0;
     const postponed = result.postponed[0]?.count || 0;
     const cancelled = result.cancelled[0]?.count || 0;
     const deliveredThisMonth = result.deliveredThisMonth[0]?.count || 0;
-    const grossCOD = result.totalCOD[0]?.total || 0;
-    const netCOD = Math.max(0, grossCOD - todayExpenses);
     const monthlyTarget = req.user.riderMeta?.monthlyTarget || 0;
 
     res.json({
@@ -288,8 +317,12 @@ export const getRiderSummary = async (req, res) => {
         pending, 
         postponed, 
         cancelled, 
-        totalCOD: netCOD, 
-        grossCOD, 
+        totalCOD: unsubmittedNet, 
+        grossCOD: unsubmittedGross,
+        unsubmittedPackageCount: unsubmittedPackages.length,
+        hasPendingHandover: pendingHandovers.length > 0,
+        pendingHandoverTotal,
+        pendingHandoversCount: pendingHandovers.length,
         totalExpenses: todayExpenses, 
         deliveredThisMonth, 
         monthlyTarget 
@@ -342,7 +375,7 @@ export const bulkPickup = async (req, res) => {
 export const submitCodHandover = async (req, res) => {
   try {
     const riderId = new mongoose.Types.ObjectId(req.user._id);
-    const { packageIds } = req.body;
+    const { packageIds, cashAmount, onlineAmount, onlineReference, remarks } = req.body;
 
     if (!packageIds || !packageIds.length) {
       return res.status(400).json({ success: false, message: 'No packages selected for handover.' });
@@ -382,16 +415,67 @@ export const submitCodHandover = async (req, res) => {
 
     const netHandoverAmount = Math.max(0, grossCOD - expenseDeduction);
 
+    let parsedCash = Number(cashAmount);
+    let parsedOnline = Number(onlineAmount);
+
+    // Default to all cash if neither is specified
+    if (isNaN(parsedCash) && isNaN(parsedOnline)) {
+      parsedCash = netHandoverAmount;
+      parsedOnline = 0;
+    } else {
+      parsedCash = isNaN(parsedCash) ? 0 : Math.max(0, parsedCash);
+      parsedOnline = isNaN(parsedOnline) ? 0 : Math.max(0, parsedOnline);
+    }
+
     const handover = await CodHandover.create({
       riderId,
       amount: netHandoverAmount,
       grossCOD,
       expenseDeduction,
+      cashAmount: parsedCash,
+      onlineAmount: parsedOnline,
+      onlineReference: onlineReference || '',
       packageIds,
       status: 'Pending Verification',
+      remarks: remarks || '',
     });
 
+    if (req.io) {
+      req.io.to(`user_${riderId}`).emit('notification', {
+        id: `handover_${handover._id}`,
+        title: 'COD Handover Submitted',
+        message: `Your COD handover of Rs. ${netHandoverAmount.toLocaleString()} has been submitted.`,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        path: '/rider/wallet',
+        type: 'info'
+      });
+      req.io.to('role_dispatcher').to('role_admin').emit('notification', {
+        id: `handover_${handover._id}`,
+        title: 'New COD Handover',
+        message: `${req.user.name || 'A rider'} submitted COD handover of Rs. ${netHandoverAmount.toLocaleString()}`,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        path: '/dispatcher/handovers',
+        type: 'info'
+      });
+    }
+
     res.status(201).json({ success: true, data: handover, message: 'Handover request submitted successfully.' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// GET /api/rider/cod-handovers
+export const getRiderCodHandovers = async (req, res) => {
+  try {
+    const riderId = req.user._id;
+    const handovers = await CodHandover.find({ riderId })
+      .populate('verifiedBy', 'name')
+      .sort({ createdAt: -1 })
+      .limit(30)
+      .lean();
+
+    res.json({ success: true, data: handovers });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

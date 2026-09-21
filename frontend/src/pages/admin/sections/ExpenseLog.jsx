@@ -12,22 +12,11 @@ import {
   Edit2, Trash2, Check, X, Bell
 } from 'lucide-react';
 
+import { StatusBadge } from '../../../components/ui/StatusBadge';
+
 // ─── Status Badge ───────────────────────────────────────────────────────────
 function statusBadge(status) {
-  const styles = {
-    'Delivered': 'bg-emerald-100 text-emerald-700 border-emerald-200',
-    'Cancelled': 'bg-red-100 text-red-700 border-red-200',
-    'Returned': 'bg-sky-100 text-sky-700 border-sky-200',
-    'Returned to Vendor': 'bg-sky-100 text-sky-700 border-sky-200',
-    'Pending': 'bg-amber-100 text-amber-700 border-amber-200',
-    'Pick Up Requested': 'bg-amber-100 text-amber-700 border-amber-200',
-    'Picked Up': 'bg-brand-100 text-brand-700 border-brand-200',
-    'In Warehouse': 'bg-brand-100 text-brand-700 border-brand-200',
-    'Out for Delivery': 'bg-brand-100 text-brand-700 border-brand-200',
-    'Postponed': 'bg-orange-100 text-orange-700 border-orange-200',
-  };
-  const style = styles[status] || 'bg-slate-100 text-slate-700 border-slate-200';
-  return <span className={'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border ' + style}>{status}</span>;
+  return <StatusBadge status={status} />;
 }
 
 const AdminExpenses = () => {
@@ -46,10 +35,19 @@ const AdminExpenses = () => {
     if (filterStatus) q.append('status', filterStatus);
     if (filterCategory) q.append('category', filterCategory);
 
-    api.get(`/admin/expenses?${q.toString()}`)
+    api.get(`/dispatcher/expenses?${q.toString()}`)
       .then(r => {
         setExpenses(r.data.data || []);
         setPagination(r.data.pagination);
+      })
+      .catch(() => {
+        // Fallback in case called under admin scope
+        api.get(`/admin/expenses?${q.toString()}`)
+          .then(r => {
+            setExpenses(r.data.data || []);
+            setPagination(r.data.pagination);
+          })
+          .catch(() => {});
       })
       .finally(() => { if (!silent) setLoading(false); });
   };
@@ -58,11 +56,17 @@ const AdminExpenses = () => {
 
   const handleStatusUpdate = async (id, newStatus) => {
     try {
-      await api.put(`/admin/expenses/${id}/status`, { status: newStatus });
+      await api.put(`/dispatcher/expenses/${id}/status`, { status: newStatus });
       showToast(`Expense marked as ${newStatus}`, 'success');
       fetchExpenses(true);
     } catch (err) {
-      showToast('Failed to update expense status', 'error');
+      try {
+        await api.put(`/admin/expenses/${id}/status`, { status: newStatus });
+        showToast(`Expense marked as ${newStatus}`, 'success');
+        fetchExpenses(true);
+      } catch (e) {
+        showToast('Failed to update expense status', 'error');
+      }
     }
   };
 

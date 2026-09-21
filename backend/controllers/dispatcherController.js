@@ -19,13 +19,18 @@ export const getPickupRequests = async (req, res) => {
     if (vendorId) query.vendorId = vendorId;
 
     const assignedPickups = await PickupRequest.find(query)
-      .populate('packageId', 'trackingCode customerName address vendorId')
-      .populate('vendorId', 'name vendorMeta')
-      .populate('assignedRiderId', 'name')
+      .populate('packageId', 'trackingCode invoiceId customerName customerPhone address city amount status deliveryCharge weight')
+      .populate('vendorId', 'name contact vendorMeta')
+      .populate('assignedRiderId', 'name contact')
       .sort({ requestedAt: -1 })
       .lean();
 
-    res.json({ success: true, data: assignedPickups });
+    // Only include packages where status is explicitly 'Pick Up Requested' or already assigned
+    const validPickups = assignedPickups.filter(p => 
+      p.packageId && (p.packageId.status === 'Pick Up Requested' || p.status === 'assigned')
+    );
+
+    res.json({ success: true, data: validPickups });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -93,6 +98,7 @@ export const confirmWarehouseArrival = async (req, res) => {
     }
 
     pkg.status = 'In Warehouse';
+    pkg.riderId = null;
     appendTimelineEvent(pkg, {
       time: nowStr(),
       status: 'Arrived in Warehouse',
@@ -174,7 +180,7 @@ export const bulkAssignPackages = async (req, res) => {
     // Batch fetch all eligible packages in one query
     const packages = await Package.find({
       _id: { $in: packageIds },
-      status: { $in: ['In Warehouse', 'Sorted', 'Postponed'] },
+      status: { $in: ['Warehouse', 'In Warehouse', 'Sorted', 'Postponed', 'Arrived', 'Dispatched', 'Picked Up', 'Pending', 'Pick Up Requested'] },
     });
 
     const updated = [];
@@ -183,7 +189,7 @@ export const bulkAssignPackages = async (req, res) => {
       pkg.status = 'Out for Delivery';
       appendTimelineEvent(pkg, {
         time: nowStr(),
-        status: 'Sent to Delivery',
+        status: 'Out for Delivery',
         message: `Bulk assigned to Rider ${rider.name}`,
         user: req.user.name,
       });
@@ -281,16 +287,15 @@ export const bulkVendorHandover = async (req, res) => {
 // PUT /api/dispatcher/bulk-status-update
 export const bulkStatusUpdate = async (req, res) => {
   try {
-    const { packageIds, status } = req.body;
+    const { packageIds, status, reason } = req.body;
 
-    const validStatuses = ['In Warehouse', 'Out for Delivery', 'Delivered'];
-    if (!packageIds?.length) {
+    if (!Array.isArray(packageIds) || packageIds.length === 0) {
       return res.status(400).json({ success: false, message: 'No packages selected.' });
     }
-    if (!status || !validStatuses.includes(status)) {
+    if (!status) {
       return res.status(400).json({
         success: false,
-        message: `Invalid status. Must be one of: ${validStatuses.join(', ')}`,
+        message: 'Status is required.',
       });
     }
 
@@ -303,32 +308,24 @@ export const bulkStatusUpdate = async (req, res) => {
 
     for (const pkg of packages) {
       pkg.status = status;
-
-      let timelineStatus = status;
-      let timelineMsg = `Status changed to "${status}" via bulk dispatcher action`;
-
-      if (status === 'In Warehouse') {
-        timelineStatus = 'Arrived in Warehouse';
-        timelineMsg = `Bulk status update to In Warehouse`;
-      } else if (status === 'Out for Delivery') {
-        timelineStatus = 'Out for Delivery';
-        timelineMsg = `Bulk status update to Out for Delivery (Dispatched)`;
-      } else if (status === 'Delivered') {
-        timelineStatus = 'Delivered';
-        timelineMsg = `Bulk status update to Delivered`;
+      if (['In Warehouse', 'Warehouse', 'Arrived', 'Arrive'].includes(status)) {
+        pkg.riderId = null;
+      }
+      if (status === 'Delivered') {
+        pkg.deliveryDate = new Date();
       }
 
       appendTimelineEvent(pkg, {
         time: nowStr(),
-        status: timelineStatus,
-        message: timelineMsg,
-        user: req.user.name || 'Dispatcher',
+        status: status,
+        message: `Status changed to "${status}" by Dispatcher ${req.user?.name || ''}${reason ? `: ${reason}` : ''}`,
+        user: req.user?.name || 'Dispatcher',
       });
 
       await pkg.save();
       updatedTrackingCodes.push(pkg.trackingCode);
 
-      if (['In Warehouse', 'Delivered'].includes(status)) {
+      if (['In Warehouse', 'Warehouse', 'Arrived', 'Arrive', 'Delivered'].includes(status)) {
         await PickupRequest.updateMany(
           { packageId: pkg._id, status: { $in: ['pending', 'assigned'] } },
           { status: 'completed', completedAt: new Date() }
@@ -346,21 +343,103 @@ export const bulkStatusUpdate = async (req, res) => {
   }
 };
 
+// PUT /api/dispatcher/packages/:id/status
+export const updateDispatcherPackageStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, riderId, comments } = req.body;
+
+    const pkg = await Package.findById(id);
+    if (!pkg) {
+      return res.status(404).json({ success: false, message: 'Package not found.' });
+    }
+
+    if (riderId !== undefined) {
+      if (!riderId || riderId === 'null') {
+        pkg.riderId = null;
+      } else {
+        const rider = await User.findOne({ _id: riderId, role: 'rider' });
+        if (rider) pkg.riderId = rider._id;
+      }
+    } else if (['In Warehouse', 'Warehouse', 'Arrived', 'Arrive'].includes(status)) {
+      pkg.riderId = null;
+    }
+
+    pkg.status = status;
+
+    let timelineStatus = status;
+    let timelineMsg = comments || `Status updated to "${status}" by Dispatcher`;
+
+    if (status === 'Arrived') {
+      timelineStatus = 'Arrived';
+      timelineMsg = comments || 'Package arrived at warehouse';
+      await PickupRequest.updateMany(
+        { packageId: pkg._id, status: { $in: ['pending', 'assigned'] } },
+        { status: 'completed', completedAt: new Date() }
+      );
+    } else if (status === 'In Warehouse') {
+      timelineStatus = 'In Warehouse';
+      timelineMsg = comments || 'Package stored in warehouse';
+      await PickupRequest.updateMany(
+        { packageId: pkg._id, status: { $in: ['pending', 'assigned'] } },
+        { status: 'completed', completedAt: new Date() }
+      );
+    } else if (status === 'Dispatched') {
+      timelineStatus = 'Dispatched';
+      timelineMsg = comments || 'Package dispatched';
+    } else if (status === 'Out for Delivery') {
+      timelineStatus = 'Out for Delivery';
+      timelineMsg = comments || 'Package out for delivery';
+    }
+
+    appendTimelineEvent(pkg, {
+      time: nowStr(),
+      status: timelineStatus,
+      message: timelineMsg,
+      user: req.user.name || 'Dispatcher',
+    });
+
+    await pkg.save();
+
+    if (req.io) {
+      if (pkg.riderId) {
+        req.io.to(`user_${pkg.riderId}`).emit('notification', {
+          title: `Package ${status}`,
+          message: `Package ${pkg.trackingCode} is now ${status}`,
+          type: 'info'
+        });
+      }
+      if (pkg.vendorId) {
+        req.io.to(`user_${pkg.vendorId}`).emit('notification', {
+          title: `Package ${status}`,
+          message: `Package ${pkg.trackingCode} is now ${status}`,
+          type: 'info'
+        });
+      }
+    }
+
+    res.json({ success: true, data: pkg, message: `Package status updated to "${status}"` });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // GET /api/dispatcher/dashboard
 export const getDispatcherDashboard = async (req, res) => {
   try {
-    const [pickupsPending, inWarehouse, outForDelivery, returnedPending, activeRiders, unassigned] = await Promise.all([
+    const [pickupsPending, inWarehouse, outForDelivery, returnedPending, activeRiders, unassigned, postponed] = await Promise.all([
       PickupRequest.countDocuments({ status: 'pending' }),
       Package.countDocuments({ status: 'In Warehouse' }),
       Package.countDocuments({ status: 'Out for Delivery' }),
       Package.countDocuments({ status: { $in: ['Returned', 'Returned to Vendor'] } }),
       User.countDocuments({ role: 'rider', status: 'Active' }),
       Package.countDocuments({ status: 'In Warehouse', riderId: null }),
+      Package.countDocuments({ status: 'Postponed' }),
     ]);
 
     res.json({
       success: true,
-      data: { pickupsPending, inWarehouse, outForDelivery, returnedPending, activeRiders, unassigned },
+      data: { pickupsPending, inWarehouse, outForDelivery, returnedPending, activeRiders, unassigned, postponed },
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -375,15 +454,25 @@ export const getAllPackagesForDispatcher = async (req, res) => {
 
     if (status && status !== 'all') {
       const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
-      if (statuses.length === 1) {
-        filter.status = statuses[0];
-      } else if (statuses.length > 1) {
-        filter.status = { $in: statuses };
+      const expandedStatuses = [];
+      for (const st of statuses) {
+        if (st === 'Warehouse' || st === 'In Warehouse') expandedStatuses.push('Warehouse', 'In Warehouse', 'Sorted');
+        else if (st === 'Arrived' || st === 'Arrive') expandedStatuses.push('Arrived', 'Arrive');
+        else if (st === 'Dispatched' || st === 'Dispatch') expandedStatuses.push('Dispatched', 'Dispatch');
+        else if (st === 'Returned' || st === 'Returned to Vendor' || st === 'Cancelled') expandedStatuses.push('Returned', 'Returned to Vendor', 'Cancelled');
+        else if (st === 'Exchange' || st === 'Exchanged') expandedStatuses.push('Exchange', 'Exchanged');
+        else if (st === 'Out for Delivery' || st === 'Out of Delivery') expandedStatuses.push('Out for Delivery', 'Out of Delivery');
+        else if (st === 'Pending') expandedStatuses.push('Pending');
+        else if (st === 'Pick Up Requested') expandedStatuses.push('Pick Up Requested');
+        else expandedStatuses.push(st);
       }
+      filter.status = { $in: Array.from(new Set(expandedStatuses)) };
+    } else {
+      filter.status = { $ne: 'Pending' };
     }
 
     if (riderId) {
-      if (riderId === 'unassigned' || riderId === 'postponed' || riderId === 'null') {
+      if (riderId === 'unassigned' || riderId === 'null') {
         filter.riderId = null;
       } else if (mongoose.Types.ObjectId.isValid(riderId)) {
         filter.riderId = riderId;
@@ -435,11 +524,11 @@ export const getAllPackagesForDispatcher = async (req, res) => {
       ];
     }
 
-    const maxLimit = Math.min(parseInt(limit) || 500, 1000);
+    const maxLimit = Math.min(parseInt(limit) || 1500, 3000);
     const packages = await Package.find(filter)
       .populate('vendorId', 'name email vendorMeta')
       .populate('riderId', 'name contact phone')
-      .sort({ createdAt: -1 })
+      .sort({ updatedAt: -1, createdAt: -1 })
       .limit(maxLimit)
       .lean();
 
@@ -519,6 +608,19 @@ export const verifyCodHandover = async (req, res) => {
         { _id: { $in: handover.packageIds } },
         { $set: { cashReconciled: true } }
       );
+    }
+
+    if (req.io && handover.riderId) {
+      req.io.to(`user_${handover.riderId}`).emit('notification', {
+        id: `handover_${handover._id}_${Date.now()}`,
+        title: status === 'Verified' ? 'COD Handover Verified' : 'COD Handover Rejected',
+        message: status === 'Verified' 
+          ? `Your COD handover of Rs. ${(handover.amount || 0).toLocaleString()} has been verified by ${req.user.name || 'Dispatcher'}.`
+          : `Your COD handover of Rs. ${(handover.amount || 0).toLocaleString()} was rejected.${remarks ? ` Note: ${remarks}` : ''}`,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        path: '/rider/wallet',
+        type: status === 'Verified' ? 'success' : 'alert'
+      });
     }
 
     res.json({ success: true, data: handover, message: `Handover ${status.toLowerCase()} successfully.` });
@@ -637,5 +739,6 @@ export const getRiderHistory = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
 
 

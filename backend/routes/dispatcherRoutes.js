@@ -16,8 +16,10 @@ import {
   verifyCodHandover,
   getRiderHistory,
   bulkVendorHandover,
-  bulkStatusUpdate
+  bulkStatusUpdate,
+  updateDispatcherPackageStatus,
 } from '../controllers/dispatcherController.js';
+import { getAllExpenses, updateExpenseStatus } from '../controllers/adminController.js';
 import { addPackageComment } from '../controllers/packageController.js';
 
 // All routes require auth + dispatcher or admin role
@@ -30,12 +32,15 @@ router.get('/riders', getAvailableRiders);
 router.put('/assign-pickup', assignRiderToPickup);
 router.put('/confirm-warehouse', confirmWarehouseArrival);
 router.put('/assign-delivery', assignRiderForDelivery);
+router.put('/packages/:id/status', updateDispatcherPackageStatus);
 router.put('/bulk-assign', bulkAssignPackages);
 router.put('/bulk-status-update', bulkStatusUpdate);
 router.put('/confirm-return', confirmReturn);
 router.put('/bulk-vendor-handover', bulkVendorHandover);
 router.get('/cod-handovers', getCodHandovers);
 router.put('/cod-handovers/:id/verify', verifyCodHandover);
+router.get('/expenses', getAllExpenses);
+router.put('/expenses/:id/status', updateExpenseStatus);
 router.get('/riders/:id/history', getRiderHistory);
 router.post('/packages/:id/comments', addPackageComment);
 

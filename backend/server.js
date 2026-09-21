@@ -85,6 +85,8 @@ app.use(hpp());
 
 // ─── Performance Middleware ───────────────────────────────────────────────────
 app.use(compression({
+  level: 6,
+  threshold: 512,
   filter: (req, res) => {
     if (req.headers['x-no-compression']) {
       return false;
@@ -208,9 +210,13 @@ if (process.env.NODE_ENV !== 'test') {
 
       // Auto-seed/update master pricing rates from Excel catalog
       const { seedExcelPricing } = await import('./services/excelPricingSeeder.js');
-      await seedExcelPricing();
+      await seedExcelPricing(true);
+
+      // Initialize daily email backup scheduler
+      const { scheduleDailyEmailBackup } = await import('./services/dailyReportService.js');
+      scheduleDailyEmailBackup();
     } catch (seedErr) {
-      logger.error(`Auto-seeding failed: ${seedErr.message}`);
+      logger.error(`Auto-seeding / email scheduler failed: ${seedErr.message}`);
     }
 
     server.listen(PORT, '0.0.0.0', () => logger.info(`Server running on port ${PORT} [${process.env.NODE_ENV}]`));

@@ -15,13 +15,32 @@ services:
     container_name: ktmexpress_backend
     ports:
       - "5000:5000"
+    env_file:
+      - path: ./.env
+        required: false
+      - path: ./backend/.env
+        required: false
     environment:
       - NODE_ENV=production
       - MONGO_URI=${MONGO_URI:-mongodb://ktmadmin:ktmexpress_db_pass_2026@mongodb:27017/ktmexpress?authSource=admin}
       - JWT_SECRET=${JWT_SECRET:-ktmexpress_jwt_secret_production_key_2026}
       - CLIENT_URL=${CLIENT_URL:-https://kdmexpress.com}
+      - REPORT_EMAIL=${REPORT_EMAIL:-kdmexpress7@gmail.com}
+      - REPORT_EMAIL_TO=${REPORT_EMAIL_TO:-maharjandiplon@gmail.com}
+      - REPORT_EMAIL_APP_PASSWORD=${REPORT_EMAIL_APP_PASSWORD:-}
+      - REPORT_INTERVAL_HOURS=${REPORT_INTERVAL_HOURS:-4}
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-465}
+      - SMTP_EMAIL=${SMTP_EMAIL:-kdmexpress7@gmail.com}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-${REPORT_EMAIL_APP_PASSWORD:-}}
     depends_on:
       - mongodb
+    healthcheck:
+      test: ["CMD-SHELL", "node -e 'fetch(\"http://127.0.0.1:5000/health\").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))'"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
     volumes:
       - ./backend/logs:/app/logs
@@ -37,4 +56,3 @@ services:
 
 volumes:
   mongodb_data:
-

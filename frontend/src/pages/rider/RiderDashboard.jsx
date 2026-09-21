@@ -9,7 +9,8 @@ import SearchPanel from '../../components/SearchPanel';
 import { 
   Package, Truck, Wallet, History, MapPin, Navigation, 
   CheckCircle2, XCircle, Clock, Search, AlertCircle, X,
-  Calendar, FileText, ChevronRight, Phone, Target, ArrowLeftRight
+  Calendar, FileText, ChevronRight, Phone, Target, ArrowLeftRight,
+  Coins, QrCode, CreditCard, Banknote, Check
 } from 'lucide-react';
 
 const navLinks = [
@@ -26,29 +27,22 @@ const titleMap = {
   '/rider/expense-history': 'Expense History',
 };
 
+import { StatusBadge } from '../../components/ui/StatusBadge';
+
 function statusBadge(status, verificationStatus) {
-  const base = "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border";
+  const base = "inline-flex items-center px-2.5 py-0.5 rounded-lg text-xs font-bold border shadow-2xs";
   if (verificationStatus === 'Pending' || verificationStatus === 'Reopened') {
-    return <span className={`${base} bg-amber-50 text-amber-700 border-amber-200 animate-pulse`}>⏳ Pending Verification</span>;
+    return <span className={`${base} bg-amber-50 text-amber-800 border-amber-200 animate-pulse`}>⏳ Pending Verification</span>;
   }
   if (verificationStatus === 'Verified') {
     return (
-      <span className={`${base} bg-emerald-50 text-emerald-700 border-emerald-200 font-semibold inline-flex items-center gap-1`}>
+      <span className={`${base} bg-emerald-50 text-emerald-800 border-emerald-300 font-bold inline-flex items-center gap-1`}>
         <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 inline" />
         {status} • Verified
       </span>
     );
   }
-  const styles = {
-    'Delivered': 'bg-emerald-50 text-emerald-700 border-emerald-200',
-    'Cancelled': 'bg-red-50 text-red-700 border-red-200',
-    'Returned': 'bg-sky-50 text-sky-700 border-sky-200',
-    'Postponed': 'bg-amber-50 text-amber-700 border-amber-200',
-    'Out for Delivery': 'bg-brand-50 text-brand-700 border-brand-200',
-    'Pick Up Requested': 'bg-amber-50 text-amber-700 border-amber-200',
-    'Picked Up': 'bg-brand-50 text-brand-700 border-brand-200'
-  };
-  return <span className={`${base} ${styles[status] || 'bg-slate-100 text-slate-700 border-slate-200'}`}>{status}</span>;
+  return <StatusBadge status={status} />;
 }
 
 const TaskCard = React.memo(({ pkg, isPickup, selectedPickups, selectedDeliveries, toggleSelect, toggleSelectDelivery, openModal }) => {
@@ -562,19 +556,40 @@ const MyDeliveries = () => {
 const CODWallet = () => {
   const [stats, setStats] = useState({});
   const [unreconciledPkgs, setUnreconciledPkgs] = useState([]);
+  const [handovers, setHandovers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [handoverModal, setHandoverModal] = useState({
+    open: false,
+    cashAmount: '',
+    onlineAmount: '',
+    onlineReference: '',
+    remarks: '',
+  });
   const { showToast } = useToast();
 
   const fetchWallet = async () => {
     try {
-      const [sumRes, delRes] = await Promise.all([
+      const [sumRes, delRes, handRes] = await Promise.all([
         api.get('/rider/summary'),
-        api.get('/rider/deliveries?type=delivery')
+        api.get('/rider/deliveries?type=delivery'),
+        api.get('/rider/cod-handovers').catch(() => ({ data: { data: [] } }))
       ]);
-      setStats(sumRes.data.data || {});
+      const summaryData = sumRes.data.data || {};
+      setStats(summaryData);
       const pkgs = delRes.data.data || [];
-      setUnreconciledPkgs(pkgs.filter(p => p.status === 'Delivered' && !p.cashReconciled));
+      const userHandovers = handRes.data.data || [];
+      setHandovers(userHandovers);
+
+      // Collect IDs of packages in pending handovers
+      const pendingIds = new Set(
+        userHandovers
+          .filter(h => h.status === 'Pending Verification')
+          .flatMap(h => (h.packageIds || []).map(id => (typeof id === 'object' ? id._id : id)?.toString()))
+      );
+
+      // Only unsubmitted packages
+      setUnreconciledPkgs(pkgs.filter(p => p.status === 'Delivered' && !p.cashReconciled && !pendingIds.has(p._id?.toString())));
     } catch (e) {
       console.error(e);
       showToast('Failed to load wallet data', 'error');
@@ -587,17 +602,63 @@ const CODWallet = () => {
     fetchWallet();
   }, []);
 
-  const handleHandover = async () => {
+  const openHandoverModal = () => {
+    const total = stats.totalCOD || 0;
+    setHandoverModal({
+      open: true,
+      cashAmount: total > 0 ? String(total) : '0',
+      onlineAmount: '0',
+      onlineReference: '',
+      remarks: '',
+    });
+  };
+
+  const handleHandoverSubmit = async (e) => {
+    if (e) e.preventDefault();
     if (!unreconciledPkgs.length) return;
+
+    const cash = Number(handoverModal.cashAmount) || 0;
+    const online = Number(handoverModal.onlineAmount) || 0;
+    const totalCOD = stats.totalCOD || 0;
+
+    if (cash < 0 || online < 0) {
+      return showToast('Handover amounts cannot be negative', 'error');
+    }
+
+    if (cash + online <= 0 && totalCOD > 0) {
+      return showToast('Please enter a valid cash or online amount.', 'warning');
+    }
+
     setSubmitting(true);
     try {
-      await api.post('/rider/cod-handover', {
-        packageIds: unreconciledPkgs.map(p => p._id)
+      const res = await api.post('/rider/cod-handover', {
+        packageIds: unreconciledPkgs.map(p => p._id),
+        cashAmount: cash,
+        onlineAmount: online,
+        onlineReference: handoverModal.onlineReference,
+        remarks: handoverModal.remarks,
       });
-      showToast('COD Handover request submitted!', 'success');
+      
+      showToast('COD Handover submitted successfully! Waiting for dispatcher verification.', 'success');
+
+      // Dispatch local notification event immediately
+      window.dispatchEvent(new CustomEvent('app_notification', {
+        detail: {
+          id: `handover_${res.data.data?._id || Date.now()}`,
+          title: 'COD Handover Submitted',
+          message: `Handover of Rs. ${(cash + online).toLocaleString()} submitted and pending verification.`,
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          read: false,
+          icon: '💰',
+          path: '/rider/wallet',
+          type: 'info'
+        }
+      }));
+
+      setHandoverModal({ open: false, cashAmount: '', onlineAmount: '', onlineReference: '', remarks: '' });
       fetchWallet();
     } catch (err) {
-      showToast(err.message || 'Failed to submit handover', 'error');
+      showToast(err.response?.data?.message || err.message || 'Failed to submit handover', 'error');
     } finally {
       setSubmitting(false);
     }
@@ -608,6 +669,12 @@ const CODWallet = () => {
   const target = stats.monthlyTarget || 0;
   const current = stats.deliveredThisMonth || 0;
   const progress = target > 0 ? Math.min(100, Math.round((current / target) * 100)) : 0;
+  const enteredCash = Number(handoverModal.cashAmount) || 0;
+  const enteredOnline = Number(handoverModal.onlineAmount) || 0;
+  const enteredSum = enteredCash + enteredOnline;
+  const targetTotal = stats.totalCOD || 0;
+  const diff = enteredSum - targetTotal;
+  const hasPending = stats.hasPendingHandover || handovers.some(h => h.status === 'Pending Verification');
   
   return (
     <div className="space-y-6 animate-fadeIn">
@@ -615,48 +682,70 @@ const CODWallet = () => {
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h2 className="text-2xl font-bold text-slate-900">Performance & Wallet</h2>
-          <p className="text-sm text-slate-500 mt-1">Track your earnings and targets</p>
+          <p className="text-sm text-slate-500 mt-1">Track your deliveries, cash collection, and shift progress</p>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        
-        {/* Wallet Primary Card */}
-        <div className="lg:col-span-2 bg-gradient-to-br from-brand-600 to-indigo-700 rounded-3xl p-8 text-white shadow-lg relative overflow-hidden flex flex-col justify-between min-h-[240px]">
-          {/* Decor */}
-          <div className="absolute top-0 right-0 -mt-8 -mr-8 w-32 h-32 bg-white opacity-10 rounded-full blur-2xl"></div>
-          <div className="absolute bottom-0 left-0 -mb-8 -ml-8 w-32 h-32 bg-black opacity-10 rounded-full blur-2xl"></div>
+        {/* Wallet Balance Card */}
+        <div className="lg:col-span-2 bg-gradient-to-br from-slate-900 via-indigo-900 to-brand-800 rounded-3xl p-7 text-white shadow-xl relative overflow-hidden flex flex-col justify-between min-h-[240px] border border-indigo-500/20">
+          <div className="absolute top-0 right-0 -mt-8 -mr-8 w-48 h-48 bg-brand-500 opacity-20 rounded-full blur-3xl"></div>
+          <div className="absolute bottom-0 left-0 -mb-8 -ml-8 w-40 h-40 bg-indigo-500 opacity-20 rounded-full blur-2xl"></div>
           
           <div className="relative z-10 flex justify-between items-start">
             <div>
-              <p className="text-brand-100 font-bold uppercase tracking-widest text-xs mb-1">Net Cash to Handover</p>
-              <h3 className="text-4xl sm:text-5xl font-black tracking-tight mt-2">Rs. {(stats.totalCOD || 0).toLocaleString()}</h3>
+              <p className="text-indigo-200 font-bold uppercase tracking-widest text-xs mb-1">
+                {hasPending && (stats.totalCOD || 0) === 0 ? 'COD Status' : 'Unsubmitted COD In Hand'}
+              </p>
+              <h3 className="text-4xl sm:text-5xl font-black tracking-tight mt-2 text-white">Rs. {(stats.totalCOD || 0).toLocaleString()}</h3>
               {stats.totalExpenses > 0 && (
-                <div className="mt-2 inline-flex items-center gap-2 bg-black/20 px-3 py-1 rounded-lg text-xs text-brand-100 font-medium border border-white/10">
-                  <span>Gross COD: <strong>Rs. {(stats.grossCOD || 0).toLocaleString()}</strong></span>
-                  <span>•</span>
+                <div className="mt-3 inline-flex items-center gap-2 bg-white/10 px-3 py-1.5 rounded-lg text-xs text-white font-medium border border-white/15">
+                  <span>Gross COD: <strong className="text-slate-100">Rs. {(stats.grossCOD || 0).toLocaleString()}</strong></span>
+                  <span className="text-white/40">•</span>
                   <span>Expenses: <strong className="text-amber-300">- Rs. {(stats.totalExpenses || 0).toLocaleString()}</strong></span>
                 </div>
               )}
+              {hasPending && (
+                <div className="mt-3 bg-amber-500/20 border border-amber-400/40 rounded-xl px-4 py-2 text-xs text-amber-200 flex items-center justify-between gap-3 backdrop-blur-sm">
+                  <span className="flex items-center gap-1.5 font-semibold text-amber-100">
+                    <Clock className="w-4 h-4 text-amber-300 animate-pulse" />
+                    Pending Handover: <strong>Rs. {(stats.pendingHandoverTotal || handovers.filter(h=>h.status==='Pending Verification').reduce((s,h)=>s+(h.amount||0),0)).toLocaleString()}</strong>
+                  </span>
+                  <span className="bg-amber-400 text-slate-900 px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider shadow-sm">
+                    Submitted
+                  </span>
+                </div>
+              )}
             </div>
-            <div className="w-12 h-12 rounded-full bg-white/20 flex items-center justify-center backdrop-blur-sm shadow-inner">
-              <Wallet className="w-6 h-6 text-white" />
+            <div className="w-14 h-14 rounded-2xl bg-white/10 border border-white/20 flex items-center justify-center backdrop-blur-sm shadow-inner text-indigo-200">
+              <Wallet className="w-7 h-7" />
             </div>
           </div>
           
-          <div className="relative z-10 mt-8 bg-black/20 rounded-2xl p-4 backdrop-blur-sm border border-white/10 flex flex-col sm:flex-row justify-between items-center gap-4">
-            <p className="text-xs text-brand-50 flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0"/> 
-              Net COD to hand over = Delivered Cash collected minus approved daily expenses.
+          <div className="relative z-10 mt-8 bg-black/30 rounded-2xl p-4 backdrop-blur-sm border border-white/15 flex flex-col sm:flex-row justify-between items-center gap-4">
+            <p className="text-xs text-indigo-100 flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 text-indigo-300"/> 
+              Net COD = Delivered collections minus approved expenses.
             </p>
-            {unreconciledPkgs.length > 0 && (
+            {unreconciledPkgs.length > 0 ? (
               <button 
-                onClick={handleHandover}
+                onClick={openHandoverModal}
                 disabled={submitting}
-                className="whitespace-nowrap px-4 py-2 bg-white text-brand-700 hover:bg-brand-50 rounded-xl text-sm font-bold shadow-md transition-colors disabled:opacity-50"
+                className="whitespace-nowrap px-6 py-3 bg-brand-500 hover:bg-brand-600 text-white rounded-xl text-sm font-bold shadow-lg transition-all active:scale-[0.98] disabled:opacity-50 flex items-center gap-2 cursor-pointer"
               >
-                {submitting ? 'Submitting...' : `Handover Rs. ${(stats.totalCOD || 0).toLocaleString()}`}
+                <Banknote className="w-4 h-4" />
+                Handover COD (Rs. {(stats.totalCOD || 0).toLocaleString()})
               </button>
+            ) : hasPending ? (
+              <div className="whitespace-nowrap px-5 py-2.5 bg-emerald-500/20 text-emerald-200 border border-emerald-400/50 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 shadow-sm">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                Handover Submitted (Pending Dispatcher Approval)
+              </div>
+            ) : (
+              <div className="whitespace-nowrap px-4 py-2 bg-white/10 text-slate-300 rounded-xl text-xs font-semibold flex items-center gap-2">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                All COD Reconciled
+              </div>
             )}
           </div>
         </div>
@@ -704,6 +793,286 @@ const CODWallet = () => {
         <MetricCard title="Postponed" value={stats.postponed??0} color="warning" icon={<Clock className="w-6 h-6 text-amber-600" />} />
         <MetricCard title="Cancelled" value={stats.cancelled??0} color="danger" icon={<XCircle className="w-6 h-6 text-red-600" />} />
       </div>
+
+      {/* ─── Recent COD Handover Submissions ─────────────────────────────────── */}
+      <div className="card-premium overflow-hidden mt-6">
+        <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center flex-wrap gap-2">
+          <div>
+            <h3 className="font-bold text-slate-900 text-base">Recent COD Handover Submissions</h3>
+            <p className="text-xs text-slate-500">Live verification status of your cash and online deposits</p>
+          </div>
+          <button 
+            onClick={() => fetchWallet()} 
+            className="text-xs font-semibold text-brand-600 hover:text-brand-700 p-1.5 rounded-lg hover:bg-brand-50 transition-colors"
+          >
+            ↻ Refresh
+          </button>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead className="bg-slate-50 text-slate-500 font-semibold uppercase tracking-wider border-b border-slate-100">
+              <tr>
+                <th className="px-5 py-3">Date</th>
+                <th className="px-5 py-3">Packages</th>
+                <th className="px-5 py-3 text-right">Cash Handover</th>
+                <th className="px-5 py-3 text-right">Online Handover</th>
+                <th className="px-5 py-3 text-right">Net Total</th>
+                <th className="px-5 py-3 text-center">Status</th>
+                <th className="px-5 py-3 text-right">Verification</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 bg-white">
+              {handovers.length === 0 ? (
+                <tr>
+                  <td colSpan="7" className="text-center py-8 text-slate-400">
+                    No COD handovers submitted yet.
+                  </td>
+                </tr>
+              ) : (
+                handovers.map(h => {
+                  const net = h.amount || 0;
+                  const cash = h.cashAmount !== undefined ? h.cashAmount : (h.onlineAmount ? Math.max(0, net - h.onlineAmount) : net);
+                  const online = h.onlineAmount || 0;
+
+                  return (
+                    <tr key={h._id} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="px-5 py-3.5 whitespace-nowrap">
+                        <div className="font-semibold text-slate-900">{new Date(h.createdAt).toLocaleDateString()}</div>
+                        <div className="text-[11px] text-slate-400">{new Date(h.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                      </td>
+                      <td className="px-5 py-3.5">
+                        <span className="font-semibold bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-[11px]">
+                          {h.packageIds?.length || 0} pkgs
+                        </span>
+                      </td>
+                      <td className="px-5 py-3.5 text-right font-medium text-emerald-700">
+                        Rs. {cash.toLocaleString()}
+                      </td>
+                      <td className="px-5 py-3.5 text-right">
+                        {online > 0 ? (
+                          <div>
+                            <span className="font-medium text-sky-700">Rs. {online.toLocaleString()}</span>
+                            {h.onlineReference && (
+                              <div className="text-[10px] text-slate-400 truncate max-w-[120px] ml-auto" title={h.onlineReference}>
+                                {h.onlineReference}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-slate-300">Rs. 0</span>
+                        )}
+                      </td>
+                      <td className="px-5 py-3.5 text-right font-bold text-slate-900">
+                        Rs. {net.toLocaleString()}
+                      </td>
+                      <td className="px-5 py-3.5 text-center">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
+                          h.status === 'Verified' 
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
+                            : h.status === 'Rejected' 
+                            ? 'bg-red-50 text-red-700 border-red-200' 
+                            : 'bg-amber-50 text-amber-700 border-amber-200 animate-pulse'
+                        }`}>
+                          {h.status === 'Verified' && '✓ '}
+                          {h.status === 'Rejected' && '✕ '}
+                          {h.status === 'Pending Verification' && '⏳ '}
+                          {h.status}
+                        </span>
+                      </td>
+                      <td className="px-5 py-3.5 text-right text-slate-500 text-[11px]">
+                        {h.status === 'Verified' ? (
+                          <span className="text-emerald-600 font-medium">Verified by {h.verifiedBy?.name || 'Dispatcher'}</span>
+                        ) : h.status === 'Rejected' ? (
+                          <span className="text-red-500 font-medium">{h.remarks || 'Rejected'}</span>
+                        ) : (
+                          <span className="text-amber-600 font-medium">Pending Review</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* ─── COD Handover Breakdown Modal ────────────────────────────────────── */}
+      {handoverModal.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-100 relative max-h-[90vh] overflow-y-auto">
+            <button
+              onClick={() => setHandoverModal(prev => ({ ...prev, open: false }))}
+              className="absolute right-4 top-4 text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 mb-5">
+              <div className="w-10 h-10 rounded-xl bg-brand-50 text-brand-600 flex items-center justify-center">
+                <Coins className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">COD Handover Deposit</h3>
+                <p className="text-xs text-slate-500">Specify physical cash vs online collections</p>
+              </div>
+            </div>
+
+            {/* Handover Summary Banner */}
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-5 space-y-2 text-sm">
+              <div className="flex justify-between items-center text-slate-600">
+                <span>Gross COD ({unreconciledPkgs.length} packages):</span>
+                <span className="font-semibold text-slate-900">Rs. {(stats.grossCOD || 0).toLocaleString()}</span>
+              </div>
+              {stats.totalExpenses > 0 && (
+                <div className="flex justify-between items-center text-amber-700">
+                  <span>Deducted Expenses:</span>
+                  <span className="font-semibold">- Rs. {(stats.totalExpenses || 0).toLocaleString()}</span>
+                </div>
+              )}
+              <div className="pt-2 border-t border-slate-200 flex justify-between items-center font-bold text-slate-900 text-base">
+                <span>Net Total Expected:</span>
+                <span className="text-brand-700">Rs. {targetTotal.toLocaleString()}</span>
+              </div>
+            </div>
+
+            <form onSubmit={handleHandoverSubmit} className="space-y-4">
+              {/* Preset Quick Buttons */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Quick Split:</span>
+                <button
+                  type="button"
+                  onClick={() => setHandoverModal(prev => ({ ...prev, cashAmount: String(targetTotal), onlineAmount: '0' }))}
+                  className="px-2.5 py-1 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition-colors"
+                >
+                  💵 100% Cash
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setHandoverModal(prev => ({ ...prev, cashAmount: '0', onlineAmount: String(targetTotal) }))}
+                  className="px-2.5 py-1 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition-colors"
+                >
+                  📱 100% Online
+                </button>
+              </div>
+
+              {/* Cash Amount Input */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5 flex items-center gap-1.5">
+                  <Banknote className="w-4 h-4 text-emerald-600" />
+                  Physical Cash Amount (Rs.)
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-sm">Rs.</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={handoverModal.cashAmount}
+                    onChange={e => {
+                      const val = e.target.value;
+                      setHandoverModal(prev => {
+                        const num = Number(val) || 0;
+                        const autoOnline = Math.max(0, targetTotal - num);
+                        return { ...prev, cashAmount: val, onlineAmount: String(autoOnline) };
+                      });
+                    }}
+                    placeholder="0"
+                    className="input-field pl-11 font-bold text-slate-900"
+                    required
+                  />
+                </div>
+              </div>
+
+              {/* Online Amount Input */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5 flex items-center gap-1.5">
+                  <QrCode className="w-4 h-4 text-sky-600" />
+                  Online / Digital Payment Amount (Rs.)
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-sm">Rs.</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={handoverModal.onlineAmount}
+                    onChange={e => {
+                      const val = e.target.value;
+                      setHandoverModal(prev => {
+                        const num = Number(val) || 0;
+                        const autoCash = Math.max(0, targetTotal - num);
+                        return { ...prev, onlineAmount: val, cashAmount: String(autoCash) };
+                      });
+                    }}
+                    placeholder="0"
+                    className="input-field pl-11 font-bold text-slate-900"
+                  />
+                </div>
+              </div>
+
+              {/* Online Transaction Reference */}
+              {enteredOnline > 0 && (
+                <div className="animate-fadeIn">
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    Online Transaction Ref / Notes (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={handoverModal.onlineReference}
+                    onChange={e => setHandoverModal(prev => ({ ...prev, onlineReference: e.target.value }))}
+                    placeholder="e.g. Fonepay ID, eSewa ref, Bank Txn #..."
+                    className="input-field text-xs"
+                  />
+                </div>
+              )}
+
+              {/* Remarks */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Additional Notes (Optional)
+                </label>
+                <textarea
+                  rows="2"
+                  value={handoverModal.remarks}
+                  onChange={e => setHandoverModal(prev => ({ ...prev, remarks: e.target.value }))}
+                  placeholder="Any notes for the dispatcher..."
+                  className="input-field text-xs resize-none"
+                />
+              </div>
+
+              {/* Breakdown Balance Status */}
+              <div className={`p-3 rounded-xl border text-xs font-medium flex items-center justify-between ${
+                diff === 0 
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+                  : 'bg-amber-50 border-amber-200 text-amber-800'
+              }`}>
+                <span>Total Handover (Cash + Online):</span>
+                <span className="font-bold">Rs. {enteredSum.toLocaleString()} {diff !== 0 && `(Diff: Rs. ${diff > 0 ? `+${diff}` : diff})`}</span>
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setHandoverModal(prev => ({ ...prev, open: false }))}
+                  className="btn-secondary flex-1 py-2.5 text-sm"
+                  disabled={submitting}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="btn-primary flex-1 py-2.5 text-sm flex items-center justify-center gap-2"
+                >
+                  {submitting ? 'Submitting...' : 'Submit Handover'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -920,8 +1289,12 @@ const RiderDashboard = () => {
   useEffect(() => {
     const fetchNotifications = async () => {
       try {
-        const res = await api.get('/rider/deliveries?type=all');
-        const pkgs = res.data.data || [];
+        const [delRes, handRes] = await Promise.all([
+          api.get('/rider/deliveries?type=all'),
+          api.get('/rider/cod-handovers').catch(() => ({ data: { data: [] } }))
+        ]);
+        const pkgs = delRes.data.data || [];
+        const handovers = handRes.data.data || [];
         
         const notifs = pkgs
           .filter(p => ['Pick Up Requested', 'Out for Delivery'].includes(p.status))
@@ -936,6 +1309,36 @@ const RiderDashboard = () => {
             icon: p.status === 'Pick Up Requested' ? '🚚' : '📦',
             path: '/rider/deliveries'
           }));
+
+        handovers.slice(0, 10).forEach(h => {
+          let title = 'COD Handover Pending Verification';
+          let message = `Deposit of Rs. ${(h.amount || 0).toLocaleString()} awaiting dispatcher verification.`;
+          let icon = '⏳';
+          let type = 'info';
+
+          if (h.status === 'Verified') {
+            title = 'COD Handover Verified ✓';
+            message = `Your deposit of Rs. ${(h.amount || 0).toLocaleString()} has been verified!`;
+            icon = '✅';
+            type = 'success';
+          } else if (h.status === 'Rejected') {
+            title = 'COD Handover Rejected ✕';
+            message = `Deposit of Rs. ${(h.amount || 0).toLocaleString()} was rejected.${h.remarks ? ` Reason: ${h.remarks}` : ''}`;
+            icon = '❌';
+            type = 'alert';
+          }
+
+          notifs.push({
+            id: `handover_${h._id}`,
+            title,
+            message,
+            time: new Date(h.updatedAt || h.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            read: false,
+            icon,
+            path: '/rider/wallet',
+            type
+          });
+        });
           
         setNotifications(notifs);
       } catch (e) {

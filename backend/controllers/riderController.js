@@ -12,13 +12,20 @@ import { nowStr, escapeRegex } from '../utils/helpers.js';
 export const getMyDeliveries = async (req, res) => {
   try {
     const riderId = new mongoose.Types.ObjectId(req.user._id);
-    const { type, status, search } = req.query; // 'pickup' or 'delivery' or 'all'
+    const { type, status, search, cashReconciled } = req.query; // 'pickup' or 'delivery' or 'unreconciled' or 'all'
 
     let filter = { riderId };
     let andConditions = [];
 
+    if (cashReconciled !== undefined) {
+      filter.cashReconciled = cashReconciled === 'true' || cashReconciled === true;
+    }
+
     if (status && status !== 'all') {
       filter.status = status;
+    } else if (type === 'unreconciled') {
+      filter.status = 'Delivered';
+      filter.cashReconciled = false;
     } else if (type === 'pickup') {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -377,27 +384,49 @@ export const submitCodHandover = async (req, res) => {
     const riderId = new mongoose.Types.ObjectId(req.user._id);
     const { packageIds, cashAmount, onlineAmount, onlineReference, remarks } = req.body;
 
-    if (!packageIds || !packageIds.length) {
-      return res.status(400).json({ success: false, message: 'No packages selected for handover.' });
+    let targetPackageIds = Array.isArray(packageIds) ? packageIds.filter(Boolean) : [];
+
+    // If packageIds is empty, auto-resolve all unsubmitted delivered packages
+    if (!targetPackageIds.length) {
+      const pendingHandovers = await CodHandover.find({
+        riderId,
+        status: 'Pending Verification'
+      }).lean();
+      const pendingPackageIds = new Set(
+        pendingHandovers.flatMap(h => (h.packageIds || []).map(id => id.toString()))
+      );
+
+      const unsubmittedPackages = await Package.find({
+        riderId,
+        status: 'Delivered',
+        cashReconciled: false,
+        _id: { $nin: Array.from(pendingPackageIds) }
+      }).select('_id').lean();
+
+      targetPackageIds = unsubmittedPackages.map(p => p._id);
+    }
+
+    if (!targetPackageIds || !targetPackageIds.length) {
+      return res.status(400).json({ success: false, message: 'No eligible un-reconciled packages found for handover.' });
     }
 
     const existing = await CodHandover.findOne({
       status: 'Pending Verification',
-      packageIds: { $in: packageIds },
+      packageIds: { $in: targetPackageIds },
     });
     if (existing) {
       return res.status(400).json({ success: false, message: 'One or more packages are already pending verification.' });
     }
 
     const packages = await Package.find({
-      _id: { $in: packageIds },
+      _id: { $in: targetPackageIds },
       riderId,
       status: 'Delivered',
       cashReconciled: false
     });
 
-    if (packages.length !== packageIds.length) {
-      return res.status(400).json({ success: false, message: 'Invalid packages selected or already reconciled.' });
+    if (!packages.length) {
+      return res.status(400).json({ success: false, message: 'No valid delivered unreconciled packages found.' });
     }
 
     const grossCOD = packages.reduce((sum, pkg) => sum + (pkg.amount || 0), 0);
@@ -435,7 +464,7 @@ export const submitCodHandover = async (req, res) => {
       cashAmount: parsedCash,
       onlineAmount: parsedOnline,
       onlineReference: onlineReference || '',
-      packageIds,
+      packageIds: targetPackageIds,
       status: 'Pending Verification',
       remarks: remarks || '',
     });

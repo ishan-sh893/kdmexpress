@@ -572,7 +572,7 @@ const CODWallet = () => {
     try {
       const [sumRes, delRes, handRes] = await Promise.all([
         api.get('/rider/summary'),
-        api.get('/rider/deliveries?type=delivery'),
+        api.get('/rider/deliveries?type=unreconciled'),
         api.get('/rider/cod-handovers').catch(() => ({ data: { data: [] } }))
       ]);
       const summaryData = sumRes.data.data || {};
@@ -603,7 +603,7 @@ const CODWallet = () => {
   }, []);
 
   const openHandoverModal = () => {
-    const total = stats.totalCOD || 0;
+    const total = (stats.totalCOD !== undefined ? stats.totalCOD : (stats.grossCOD || 0)) || 0;
     setHandoverModal({
       open: true,
       cashAmount: total > 0 ? String(total) : '0',
@@ -615,7 +615,10 @@ const CODWallet = () => {
 
   const handleHandoverSubmit = async (e) => {
     if (e) e.preventDefault();
-    if (!unreconciledPkgs.length) return;
+    const targetPkgIds = unreconciledPkgs.map(p => p._id);
+    if (!targetPkgIds.length && (stats.unsubmittedPackageCount || 0) === 0 && (stats.totalCOD || 0) === 0) {
+      return showToast('No pending COD packages to handover', 'info');
+    }
 
     const cash = Number(handoverModal.cashAmount) || 0;
     const online = Number(handoverModal.onlineAmount) || 0;
@@ -632,7 +635,7 @@ const CODWallet = () => {
     setSubmitting(true);
     try {
       const res = await api.post('/rider/cod-handover', {
-        packageIds: unreconciledPkgs.map(p => p._id),
+        packageIds: targetPkgIds,
         cashAmount: cash,
         onlineAmount: online,
         onlineReference: handoverModal.onlineReference,
@@ -672,7 +675,7 @@ const CODWallet = () => {
   const enteredCash = Number(handoverModal.cashAmount) || 0;
   const enteredOnline = Number(handoverModal.onlineAmount) || 0;
   const enteredSum = enteredCash + enteredOnline;
-  const targetTotal = stats.totalCOD || 0;
+  const targetTotal = (stats.totalCOD !== undefined ? stats.totalCOD : (stats.grossCOD || 0)) || 0;
   const diff = enteredSum - targetTotal;
   const hasPending = stats.hasPendingHandover || handovers.some(h => h.status === 'Pending Verification');
   
@@ -727,7 +730,7 @@ const CODWallet = () => {
               <AlertCircle className="w-4 h-4 shrink-0 text-indigo-300"/> 
               Net COD = Delivered collections minus approved expenses.
             </p>
-            {unreconciledPkgs.length > 0 ? (
+            {(unreconciledPkgs.length > 0 || (stats.totalCOD || 0) > 0 || (stats.grossCOD || 0) > 0 || (stats.unsubmittedPackageCount || 0) > 0) ? (
               <button 
                 onClick={openHandoverModal}
                 disabled={submitting}
@@ -922,7 +925,7 @@ const CODWallet = () => {
             {/* Handover Summary Banner */}
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-5 space-y-2 text-sm">
               <div className="flex justify-between items-center text-slate-600">
-                <span>Gross COD ({unreconciledPkgs.length} packages):</span>
+                <span>Gross COD ({unreconciledPkgs.length || stats.unsubmittedPackageCount || 0} packages):</span>
                 <span className="font-semibold text-slate-900">Rs. {(stats.grossCOD || 0).toLocaleString()}</span>
               </div>
               {stats.totalExpenses > 0 && (

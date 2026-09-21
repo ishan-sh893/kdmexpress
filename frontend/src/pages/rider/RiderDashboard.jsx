@@ -134,8 +134,10 @@ const TaskCard = React.memo(({ pkg, isPickup, selectedPickups, selectedDeliverie
 
 // ─── My Deliveries ────────────────────────────────────────────────────────
 const MyDeliveries = () => {
+  const navigate = useNavigate();
   const [deliveries, setDeliveries] = useState([]);
   const [pickups, setPickups] = useState([]);
+  const [riderSummary, setRiderSummary] = useState({});
   const [loading, setLoading] = useState(true);
   const [actionModal, setActionModal] = useState({open:false,pkg:null,action:''});
   const [form, setForm] = useState({comment:'',cashCollected:'',newDate:''});
@@ -154,12 +156,14 @@ const MyDeliveries = () => {
     if (!silent) setLoading(true);
     try {
       const queryStr = search ? `&search=${encodeURIComponent(search)}` : '';
-      const [d, p] = await Promise.all([
+      const [d, p, s] = await Promise.all([
         api.get(`/rider/deliveries?type=delivery${queryStr}`), 
-        api.get(`/rider/deliveries?type=pickup${queryStr}`)
+        api.get(`/rider/deliveries?type=pickup${queryStr}`),
+        api.get('/rider/summary').catch(() => ({ data: { data: {} } }))
       ]);
       setDeliveries(d.data.data||[]);
       setPickups(p.data.data||[]);
+      setRiderSummary(s.data.data||{});
       setSelectedPickups([]);
       setSelectedDeliveries([]);
     } catch { 
@@ -308,6 +312,28 @@ const MyDeliveries = () => {
   return (
     <div className="space-y-6 animate-fadeIn">
       
+      {/* Top COD Handover Banner if Rider has unsubmitted COD */}
+      {(riderSummary.totalCOD > 0 || (riderSummary.grossCOD || 0) > 0) && (
+        <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-indigo-700 text-white rounded-2xl p-4 shadow-lg flex flex-col sm:flex-row justify-between items-center gap-4 border border-white/20">
+          <div className="flex items-center gap-3.5">
+            <div className="w-11 h-11 rounded-xl bg-white/20 flex items-center justify-center text-white shrink-0 backdrop-blur-sm shadow-inner">
+              <Coins className="w-6 h-6" />
+            </div>
+            <div>
+              <h4 className="font-black text-base text-white">Unsubmitted COD in Hand: Rs. {(riderSummary.totalCOD || riderSummary.grossCOD || 0).toLocaleString()}</h4>
+              <p className="text-xs text-emerald-100">You have completed collections ready for dispatcher handover deposit.</p>
+            </div>
+          </div>
+          <button
+            onClick={() => navigate('/rider/wallet')}
+            className="whitespace-nowrap px-5 py-2.5 bg-white text-slate-900 hover:bg-emerald-50 rounded-xl text-xs font-black shadow-md transition-all active:scale-95 flex items-center gap-2 cursor-pointer shrink-0"
+          >
+            <Banknote className="w-4 h-4 text-emerald-600" />
+            Handover COD Now →
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h2 className="text-2xl font-bold text-slate-900">Task Overview</h2>
@@ -687,6 +713,16 @@ const CODWallet = () => {
           <h2 className="text-2xl font-bold text-slate-900">Performance & Wallet</h2>
           <p className="text-sm text-slate-500 mt-1">Track your deliveries, cash collection, and shift progress</p>
         </div>
+        {(unreconciledPkgs.length > 0 || (stats.totalCOD || 0) > 0 || (stats.grossCOD || 0) > 0 || (stats.unsubmittedPackageCount || 0) > 0) && (
+          <button
+            onClick={openHandoverModal}
+            disabled={submitting}
+            className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold shadow-md transition-all active:scale-95 flex items-center gap-2 cursor-pointer"
+          >
+            <Banknote className="w-4 h-4" />
+            Handover COD (Rs. {(stats.totalCOD || 0).toLocaleString()})
+          </button>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -734,9 +770,9 @@ const CODWallet = () => {
               <button 
                 onClick={openHandoverModal}
                 disabled={submitting}
-                className="whitespace-nowrap px-6 py-3 bg-brand-500 hover:bg-brand-600 text-white rounded-xl text-sm font-bold shadow-lg transition-all active:scale-[0.98] disabled:opacity-50 flex items-center gap-2 cursor-pointer"
+                className="whitespace-nowrap px-6 py-3.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black rounded-xl text-sm shadow-lg shadow-emerald-950/40 transition-all active:scale-[0.98] disabled:opacity-50 flex items-center gap-2 cursor-pointer ring-2 ring-emerald-300/60"
               >
-                <Banknote className="w-4 h-4" />
+                <Banknote className="w-4 h-4 text-slate-900" />
                 Handover COD (Rs. {(stats.totalCOD || 0).toLocaleString()})
               </button>
             ) : hasPending ? (

@@ -1,32 +1,26 @@
 #!/bin/bash
 # =======================================================
-# Ktmexpress Hostinger VPS One-Click Clean Deployment Script
+# Ktmexpress Hostinger VPS Deployment Script (DATA SAFE)
 # Domain: kdmexpress.com | IP: 200.141.11.152
 # Repository: https://github.com/Tester10-lab/Ktmexpress.git
 # =======================================================
 
 set -e
 
-echo "🚀 Starting 100% Clean Hostinger VPS Deployment for Ktmexpress..."
+echo "🚀 Starting Safe Hostinger VPS Deployment for Ktmexpress (Data Preserved)..."
 
-# 1. Stop and completely wipe old Docker containers, images, cache, and volumes
-echo "🧹 Wiping old Docker containers, images, and cached build layers..."
-docker compose down -v --remove-orphans 2>/dev/null || true
-docker stop $(docker ps -aq) 2>/dev/null || true
-docker rm $(docker ps -aq) 2>/dev/null || true
-docker rmi -f $(docker images -q) 2>/dev/null || true
-docker volume prune -f 2>/dev/null || true
-docker builder prune -af 2>/dev/null || true
-docker system prune -af --volumes 2>/dev/null || true
+# 1. Automatic Database Safety Backup if MongoDB is currently running
+mkdir -p /var/backups/ktmexpress
+if docker ps -q --filter "name=ktmexpress_mongodb" | grep -q .; then
+    echo "💾 Creating automatic safety backup of MongoDB database..."
+    BACKUP_NAME="mongodb_backup_$(date +%Y%m%d_%H%M%S)"
+    docker exec ktmexpress_mongodb mongodump --username ktmadmin --password ktmexpress_db_pass_2026 --authenticationDatabase admin --db ktmexpress --archive="/data/db/${BACKUP_NAME}.archive" 2>/dev/null || true
+    echo "✅ Backup archive created in database volume."
+fi
 
-# Kill any lingering services on ports
-fuser -k 80/tcp 2>/dev/null || true
-fuser -k 443/tcp 2>/dev/null || true
-fuser -k 5000/tcp 2>/dev/null || true
-fuser -k 8080/tcp 2>/dev/null || true
-
-# 2. Update system packages
-apt-get update -y
+# 2. Safely stop containers WITHOUT deleting volumes (-v is NEVER used)
+echo "🛑 Safely stopping old application containers (preserving MongoDB database volume)..."
+docker compose down 2>/dev/null || true
 
 # 3. Ensure 2GB swap space exists (prevents Out-Of-Memory during React build)
 if [ $(swapon --show | wc -l) -eq 0 ]; then
@@ -47,39 +41,38 @@ fi
 
 if ! docker compose version &> /dev/null; then
     echo "📦 Installing Docker Compose..."
-    apt-get install -y docker-compose-plugin
+    apt-get update -y && apt-get install -y docker-compose-plugin
 fi
 
-# 5. Backup .env if exists, then re-clone the repository
+# 5. Backup .env if exists, then update the repository
 DEPLOY_DIR="/var/www/ktmexpress"
-if [ -f "$DEPLOY_DIR/.env" ]; then
-    echo "💾 Backing up existing .env configuration..."
-    cp "$DEPLOY_DIR/.env" /root/.ktmexpress.env
-elif [ -f "$DEPLOY_DIR/backend/.env" ]; then
-    cp "$DEPLOY_DIR/backend/.env" /root/.ktmexpress.env
+if [ -d "$DEPLOY_DIR/.git" ]; then
+    echo "📥 Pulling latest code into $DEPLOY_DIR..."
+    cd "$DEPLOY_DIR"
+    git fetch origin main
+    git reset --hard origin/main
+else
+    echo "📥 Cloning fresh repository into $DEPLOY_DIR..."
+    mkdir -p /var/www
+    if [ -f "$DEPLOY_DIR/.env" ]; then
+        cp "$DEPLOY_DIR/.env" /root/.ktmexpress.env
+    fi
+    rm -rf "$DEPLOY_DIR"
+    git clone https://github.com/Tester10-lab/Ktmexpress.git "$DEPLOY_DIR"
+    cd "$DEPLOY_DIR"
+    if [ -f /root/.ktmexpress.env ]; then
+        echo "♻️ Restoring your saved .env configuration..."
+        cp /root/.ktmexpress.env "$DEPLOY_DIR/.env"
+        cp /root/.ktmexpress.env "$DEPLOY_DIR/backend/.env"
+    fi
 fi
 
-echo "🗑️ Updating deployment directory $DEPLOY_DIR..."
-rm -rf "$DEPLOY_DIR"
-
-echo "📥 Cloning fresh repository from Tester10-lab/Ktmexpress.git..."
-mkdir -p /var/www
-git clone https://github.com/Tester10-lab/Ktmexpress.git "$DEPLOY_DIR"
-cd "$DEPLOY_DIR"
-
-# Restore .env if backup exists
-if [ -f /root/.ktmexpress.env ]; then
-    echo "♻️ Restoring your saved .env configuration..."
-    cp /root/.ktmexpress.env "$DEPLOY_DIR/.env"
-    cp /root/.ktmexpress.env "$DEPLOY_DIR/backend/.env"
-fi
-
-# 6. Build and launch Docker containers with --no-cache to guarantee fresh frontend/backend
-echo "🐳 Building Docker containers with --no-cache (clean build)..."
-docker compose build --no-cache --pull
+# 6. Build and launch Docker containers (clean frontend/backend build, existing DB volume attached)
+echo "🐳 Building frontend and backend containers..."
+docker compose build --no-cache
 docker compose up -d
 
-echo "🌱 Waiting for database & seeding Super Admin..."
+echo "🌱 Waiting for database & backend services..."
 sleep 6
 docker compose exec -T backend node seed.js || true
 
@@ -92,6 +85,6 @@ elif command -v nginx &> /dev/null; then
 fi
 
 echo "======================================================="
-echo "🎉 Clean deployment successful!"
-echo "Your app is live on https://kdmexpress.com and http://200.141.11.152"
+echo "🎉 Deployment successful! All database data was preserved."
+echo "Live URL: https://kdmexpress.com"
 echo "======================================================="

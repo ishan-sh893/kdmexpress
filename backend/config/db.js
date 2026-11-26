@@ -11,7 +11,12 @@ export const connectDB = async () => {
     console.warn('Failed to set DNS servers', err);
   }
 
-  let mongoUri = process.env.MONGO_URI || 'mongodb://ktmadmin:ktmexpress_db_pass_2026@mongodb:27017/ktmexpress?authSource=admin';
+  let mongoUri = process.env.MONGO_URI;
+
+  if (!mongoUri && process.env.USE_MEMORY_DB !== 'true') {
+    logger.error('MONGO_URI is not set. Refusing to start without a database connection string.');
+    process.exit(1);
+  }
 
   if (process.env.USE_MEMORY_DB === 'true') {
     logger.info('Starting In-Memory MongoDB Server...');
@@ -45,15 +50,7 @@ export const connectDB = async () => {
 
   while (retries < MAX_RETRIES) {
     try {
-      let currentUri = mongoUri;
-      if (retries > 0 && currentUri.includes('mongodb+srv://')) {
-        // Fallback SRV to direct shard endpoints if querySrv is blocked by host DNS
-        currentUri = currentUri.replace(
-          'mongodb+srv://kdmexpress7_db_user:kdmexpress7_db_user@cluster0.cnh6hgr.mongodb.net/kdmexpress',
-          'mongodb://kdmexpress7_db_user:kdmexpress7_db_user@ac-ta5bhnp-shard-00-00.cnh6hgr.mongodb.net:27017,ac-ta5bhnp-shard-00-01.cnh6hgr.mongodb.net:27017,ac-ta5bhnp-shard-00-02.cnh6hgr.mongodb.net:27017/kdmexpress?ssl=true&replicaSet=atlas-13b7m1-shard-0&authSource=admin'
-        );
-      }
-      const conn = await mongoose.connect(currentUri, {
+      const conn = await mongoose.connect(mongoUri, {
         minPoolSize: 5,
         maxPoolSize: 50,
         maxIdleTimeMS: 30000,

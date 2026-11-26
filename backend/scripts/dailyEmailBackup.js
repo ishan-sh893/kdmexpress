@@ -13,7 +13,8 @@ dotenv.config({ path: '/app/backend/.env' });
 import { sendDailyEmailBackup } from '../services/dailyReportService.js';
 
 async function run() {
-  const mongoUri = process.env.MONGO_URI || 'mongodb://ktmadmin:ktmexpress_db_pass_2026@mongodb:27017/ktmexpress?authSource=admin';
+  const mongoUri = process.env.MONGO_URI;
+  if (!mongoUri) { console.error('MONGO_URI is not set.'); process.exit(1); }
   await mongoose.connect(mongoUri);
   const result = await sendDailyEmailBackup();
   console.log(result);

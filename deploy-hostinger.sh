@@ -14,7 +14,7 @@ mkdir -p /var/backups/ktmexpress
 if docker ps -q --filter "name=ktmexpress_mongodb" | grep -q .; then
     echo "💾 Creating automatic safety backup of MongoDB database..."
     BACKUP_NAME="mongodb_backup_$(date +%Y%m%d_%H%M%S)"
-    docker exec ktmexpress_mongodb mongodump --username ktmadmin --password ktmexpress_db_pass_2026 --authenticationDatabase admin --db ktmexpress --archive="/data/db/${BACKUP_NAME}.archive" 2>/dev/null || true
+    docker exec ktmexpress_mongodb sh -c 'mongodump --username "$MONGO_INITDB_ROOT_USERNAME" --password "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --db "${MONGO_INITDB_DATABASE:-ktmexpress}" --archive="/data/db/'"${BACKUP_NAME}"'.archive"' 2>/dev/null || true
     echo "✅ Backup archive created in database volume."
 fi
 

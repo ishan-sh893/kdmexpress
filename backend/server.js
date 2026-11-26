@@ -175,36 +175,27 @@ const PORT = process.env.PORT || 5000;
 
 if (process.env.NODE_ENV !== 'test') {
   connectDB().then(async () => {
-    // Auto-seed default accounts for all roles
+    // Bootstrap the first super admin ONLY on an empty database.
+    // Credentials come from ADMIN_EMAIL / ADMIN_PASSWORD; existing users are never modified.
     try {
       const User = (await import('./models/User.js')).default;
-      
-      const defaultUsers = [
-        { name: 'System Admin', email: 'admin@kdmexpress.com', password: 'admin123', role: 'admin', isSuperAdmin: true, contact: '9800000000' },
-        { name: 'Demo Vendor', email: 'vendor@kdmexpress.com', password: 'vendor123', role: 'vendor', contact: '9800000001', vendorMeta: { shopName: 'Demo Store' } },
-        { name: 'Demo Dispatcher', email: 'dispatcher@kdmexpress.com', password: 'dispatcher123', role: 'dispatcher', contact: '9800000002' },
-        { name: 'Demo Rider', email: 'rider@kdmexpress.com', password: 'rider123', role: 'rider', contact: '9800000003' },
-        // Backwards-compatible aliases
-        { name: 'System Admin', email: 'admin@ktmexpress.com', password: 'admin123', role: 'admin', isSuperAdmin: true, contact: '9800000000' },
-        { name: 'Demo Vendor', email: 'vendor@ktmexpress.com', password: 'vendor123', role: 'vendor', contact: '9800000001', vendorMeta: { shopName: 'Demo Store' } },
-        { name: 'Demo Dispatcher', email: 'dispatcher@ktmexpress.com', password: 'dispatcher123', role: 'dispatcher', contact: '9800000002' },
-        { name: 'Demo Rider', email: 'rider@ktmexpress.com', password: 'rider123', role: 'rider', contact: '9800000003' }
-      ];
 
-      for (const u of defaultUsers) {
-        let user = await User.findOne({ email: u.email }).select('+password +loginAttempts +lockUntil');
-        if (!user) {
-          user = new User({ ...u, status: 'Active' });
-          await user.save();
-          logger.info(`Seeded account: ${u.email} (${u.role})`);
+      if ((await User.countDocuments()) === 0) {
+        const adminEmail = process.env.ADMIN_EMAIL || 'admin@kdmexpress.com';
+        const adminPassword = process.env.ADMIN_PASSWORD;
+
+        if (!adminPassword || adminPassword.length < 12) {
+          logger.error('No users exist and ADMIN_PASSWORD is missing or shorter than 12 characters; skipping admin bootstrap.');
         } else {
-          // Reset password & clear lock
-          user.password = u.password;
-          user.status = 'Active';
-          user.loginAttempts = 0;
-          user.lockUntil = null;
-          await user.save();
-          logger.info(`Updated/unlocked account: ${u.email}`);
+          await new User({
+            name: 'System Admin',
+            email: adminEmail,
+            password: adminPassword,
+            role: 'admin',
+            isSuperAdmin: true,
+            status: 'Active',
+          }).save();
+          logger.info(`Bootstrapped initial super admin: ${adminEmail}`);
         }
       }
 
@@ -219,7 +210,8 @@ if (process.env.NODE_ENV !== 'test') {
       logger.error(`Auto-seeding / email scheduler failed: ${seedErr.message}`);
     }
 
-    server.listen(PORT, '0.0.0.0', () => logger.info(`Server running on port ${PORT} [${process.env.NODE_ENV}]`));
+    const HOST = process.env.HOST || '0.0.0.0';
+    server.listen(PORT, HOST, () => logger.info(`Server running on ${HOST}:${PORT} [${process.env.NODE_ENV}]`));
   });
 }
 

@@ -11,15 +11,18 @@ dotenv.config({ path: path.join(__dirname, '.env') });
 
 const cleanAndSeed = async () => {
   try {
-    const mongoUri = process.env.MONGO_URI || 'mongodb://ktmadmin:ktmexpress_db_pass_2026@mongodb:27017/ktmexpress?authSource=admin';
+    const mongoUri = process.env.MONGO_URI;
+    const adminEmail = process.env.ADMIN_EMAIL || 'admin@kdmexpress.com';
+    const adminPassword = process.env.ADMIN_PASSWORD;
+    if (!mongoUri) throw new Error('MONGO_URI is not set.');
+    if (!adminPassword || adminPassword.length < 12) {
+      throw new Error('ADMIN_PASSWORD must be set and at least 12 characters long.');
+    }
     console.log(`Connecting to database...`);
     
     await mongoose.connect(mongoUri);
     console.log('Connected to MongoDB for Production Seed Cleanup');
 
-    const adminEmail = 'admin@kdmexpress.com';
-    const adminPassword = process.env.ADMIN_PASSWORD || 'admin123';
-    
     // Clean up completely invalid users
     await User.deleteMany({ $or: [{ email: null }, { email: '' }] });
 
@@ -50,7 +53,7 @@ const cleanAndSeed = async () => {
       admin.lockUntil = undefined;
       await admin.save(); // This triggers the bcrypt pre-save hook
       await User.updateOne({ email: adminEmail }, { $set: { loginAttempts: 0 }, $unset: { lockUntil: 1 } });
-      console.log('Admin password securely reset to admin123, account unlocked, and Super Admin status verified.');
+      console.log('Admin password reset from ADMIN_PASSWORD, account unlocked, and Super Admin status verified.');
     }
 
     // Seed master catalog pricing rates for Outside Valley & KTM Base Rate

@@ -19,7 +19,8 @@ dotenv.config({ path: path.join(__dirname, '../../.env') });
 
 const wipeOldData = async () => {
   try {
-    const mongoUri = process.env.MONGO_URI || 'mongodb://ktmadmin:ktmexpress_db_pass_2026@mongodb:27017/ktmexpress?authSource=admin';
+    const mongoUri = process.env.MONGO_URI;
+    if (!mongoUri) { console.error('MONGO_URI is not set.'); process.exit(1); }
     console.log('Connecting to MongoDB...');
     await mongoose.connect(mongoUri);
     console.log('✅ Connected to database for data wipe.');

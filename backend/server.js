@@ -117,7 +117,7 @@ app.use((req, res, next) => {
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // ─── Health check ─────────────────────────────────────────────────────────────
-app.get(['/', '/health', '/api/health'], (req, res) => {
+app.get(['/health', '/api/health'], (req, res) => {
   const dbStateMap = {
     0: 'disconnected',
     1: 'connected',
